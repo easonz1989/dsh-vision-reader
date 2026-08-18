@@ -1,5 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -259,6 +260,23 @@ function analysisContext(result: AnalyzeResult, media: readonly MediaItem[]): st
   ].join('\n')
 }
 
+function visionToolInstruction(media: readonly MediaItem[]): ReturnType<typeof createUserMessage> {
+  return createUserMessage({
+    content: [{
+      type: 'text',
+      text: [
+        '<vision_plugin_instruction>',
+        'The user attached visual media to the current message through dsh-vision-reader.',
+        'Before answering the user, call the analyze_media tool exactly once so the separately configured VL provider can inspect it.',
+        'Do not claim that the primary model cannot see images. Do not answer the visual question until the tool returns and the vision-analysis context is available.',
+        `Attached media count: ${media.length}.`,
+        '</vision_plugin_instruction>',
+      ].join('\n'),
+    }],
+    source: { kind: 'plugin', plugin: 'dsh-vision-reader' },
+  })
+}
+
 async function analyzeMedia(config: VisionConfig, prompt: string, media: readonly MediaItem[]): Promise<AnalyzeResult> {
   const base = normalizeBaseUrl(config.baseUrl)
   if (!base) return { ok: false, error: '请先配置 Provider API Base URL' }
@@ -444,6 +462,28 @@ export function apply(ctx: Context) {
       },
       { authority: 'trusted-host' },
     )
+  })
+
+  // Keep the primary model text-only. When the browser has submitted media,
+  // tell the Agent through the official pre-step message boundary to call the
+  // plugin tool. The tool performs VL inference and defers the resulting
+  // vision-analysis context into the same turn. Plain-text turns are untouched.
+  ctx.on('agent/pre-step', async ({ agent, messages }, next): Promise<PreStepDecision> => {
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+
+    const batch = pendingMedia.get(String(agent.session.id))
+    if (
+      batch === undefined
+      || batch.contextDeferred
+      || !getConfig().autoVisionFallback
+      || promptFromUserMessages(messages) === ''
+    ) return decision
+
+    return {
+      kind: 'enter',
+      messages: [...decision.messages, visionToolInstruction(batch.items)],
+    }
   })
 
   ctx.on('agent/turn-stopping', ({ agent }) => {

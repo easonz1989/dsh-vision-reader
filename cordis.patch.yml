@@ -1,0 +1,16 @@
+# dsh-vision-reader bundle patch: inserts the Host plugin row that registers
+# the vision-media provider logic, the RPC surface, and the analyze_media agent
+# tool. Declaring `dsh.bundle.patch` in package.json makes `dsh plugin add` treat
+# this package as a profile bundle: it joins `dsh.profile.bundles` automatically,
+# shows up under Settings > Plugins, and runs persistently on every boot — no
+# manual toggling.
+
+- insert:
+    # Host half: provider health/models discovery, durable settings, per-session
+    # media inbox, Client RPC (rpc.handle -> client call), and the analyze_media
+    # model tool. `name` resolves this package's own "main" (lib/index.js) from
+    # the profile's node_modules.
+    - id: vision-reader
+      name: 'dsh-vision-reader'
+      config:
+        server: true

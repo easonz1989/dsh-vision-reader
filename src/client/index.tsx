@@ -1,16 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
-import type { SettingsScopeSpec, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 
 const NS = 'vision-reader'
 const CHANNEL = '/vision-reader'
 const MAX_MEDIA_ITEMS = 6
-
-interface ClientConfig {
-  selectedModel?: string
-  followLocale?: boolean
-}
 
 interface ModelDescriptor {
   id: string
@@ -30,7 +24,7 @@ interface ServerState {
   baseUrl: string
   hasKey: boolean
   selectedModel: string
-  followLocale: boolean
+  autoVisionFallback: boolean
 }
 
 interface ClientMedia {
@@ -89,8 +83,6 @@ function useClientMedia(sessionId: string): readonly ClientMedia[] {
   )
 }
 
-let latestFollowLocale = true
-
 const dict = {
   zh: {
     nav: '视觉模型', title: '视觉模型',
@@ -103,7 +95,7 @@ const dict = {
     healthOk: '连接正常 · HTTP {status} · {count} 个模型', healthBad: 'Provider 检测失败', notProbed: '尚未检测连接',
     modelTitle: '视觉模型', modelHint: '选择处理已附加图片与影片的模型。', noModels: '检测 Provider 后会在这里显示模型。',
     selected: '当前：{model}', supported: '支持视觉', unsupported: '未声明视觉能力',
-    followLabel: '设置标题跟随界面语言', followHint: '关闭后固定显示“视觉模型”。',
+    autoLabel: '主模型不支持视觉时自动使用视觉插件', autoHint: '启用后，附加媒体会先由所选视觉模型读取，再把安全的文字分析交给主模型。',
     upload: '添加媒体', uploadBusy: '正在添加…', uploadTip: '添加最多 6 张图片或影片',
     defaultRequest: '请分析我附加的媒体。', attached: '视觉模型附件', remove: '移除', video: '影片',
     uploadFail: '无法添加媒体：{err}', conversationUnavailable: 'Harness 附件服务尚未就绪',
@@ -119,7 +111,7 @@ const dict = {
     healthOk: 'Connected · HTTP {status} · {count} models', healthBad: 'Provider check failed', notProbed: 'Connection has not been tested',
     modelTitle: 'Vision model', modelHint: 'Choose the model that processes attached images and videos.', noModels: 'Models appear here after testing the provider.',
     selected: 'Current: {model}', supported: 'Vision capable', unsupported: 'Vision capability not declared',
-    followLabel: 'Follow the interface language', followHint: 'When off, the section name stays “视觉模型”.',
+    autoLabel: "Auto use vision plugin when model doesn't have vision", autoHint: 'Attached media is read by the selected vision model, then safe text analysis is passed to the primary model.',
     upload: 'Add media', uploadBusy: 'Adding…', uploadTip: 'Attach up to 6 images or videos',
     defaultRequest: 'Please analyze the attached media.', attached: 'Visual Model attachments', remove: 'Remove', video: 'Video',
     uploadFail: 'Could not add media: {err}', conversationUnavailable: 'Harness attachment service is not ready',
@@ -142,7 +134,7 @@ const styles = `
 .vr-error{color:var(--dsw-alias-state-error-primary);white-space:pre-wrap}.vr-saved{color:var(--dsw-alias-state-success-primary);font-size:12px;line-height:18px}
 .vr-models{display:flex;flex-direction:column;gap:8px}.vr-model{box-sizing:border-box;width:100%;display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;text-align:left;cursor:pointer}.vr-model:hover{background:var(--dsw-alias-interactive-bg-hover)}.vr-model-selected{border-color:var(--dsw-alias-border-l3);background:var(--dsw-alias-interactive-bg-hover-solid)}
 .vr-radio{box-sizing:border-box;flex:none;width:16px;height:16px;border:1px solid var(--dsw-alias-border-l3);border-radius:50%;padding:3px}.vr-model-selected .vr-radio:after{content:'';display:block;width:100%;height:100%;border-radius:50%;background:var(--dsw-alias-button-primary-fill)}.vr-model-copy{min-width:0;flex:1}.vr-model-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:20px}.vr-model-meta{display:block;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
-.vr-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0}.vr-toggle-copy{display:flex;flex-direction:column;gap:2px}.vr-switch{position:relative;flex:none;width:36px;height:20px;border:0;border-radius:10px;background:var(--dsw-alias-bg-module-platform);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l2);cursor:pointer}.vr-switch:after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-tertiary);transition:transform .16s ease}.vr-switch-on{background:var(--dsw-alias-button-primary-fill);box-shadow:none}.vr-switch-on:after{transform:translateX(16px);background:var(--dsw-alias-label-primary-foreground)}
+.vr-toggle-row{display:flex;flex-direction:row;align-items:center;justify-content:space-between;gap:16px;padding:10px 0}.vr-card.vr-toggle-row{padding:12px 16px}.vr-toggle-copy{display:flex;flex:1;flex-direction:column;gap:2px}.vr-switch{position:relative;flex:none;width:36px;height:20px;border:0;border-radius:10px;background:var(--dsw-alias-bg-module-platform);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l2);cursor:pointer}.vr-switch:after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-tertiary);transition:transform .16s ease}.vr-switch-on{background:var(--dsw-alias-button-primary-fill);box-shadow:none}.vr-switch-on:after{transform:translateX(16px);background:var(--dsw-alias-label-primary-foreground)}
 .vr-upload-wrap{position:relative;display:inline-flex;align-items:center}.vr-upload{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}.vr-upload:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}.vr-upload svg{width:15px;height:15px}.vr-upload-error{position:absolute;left:0;top:34px;z-index:20;width:max-content;max-width:300px;padding:7px 9px;border-radius:8px;background:var(--dsw-alias-bg-module-platform);box-shadow:0 4px 18px rgba(0,0,0,.18);color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:16px}
 [data-composer-card]:has(.vr-media-dock){padding-top:90px}.vr-media-dock{box-sizing:border-box;position:absolute;z-index:2;top:10px;left:12px;right:12px;min-width:0;height:68px}.vr-media-list{display:flex;height:68px;gap:8px;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin}.vr-media-item{position:relative;flex:none;width:76px;height:68px;overflow:hidden;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}.vr-media-item img,.vr-media-item video{display:block;width:100%;height:100%;object-fit:cover}.vr-media-name{position:absolute;left:0;right:0;bottom:0;padding:14px 5px 4px;background:linear-gradient(transparent,rgba(0,0,0,.8));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#fff;font-size:9px;line-height:12px}.vr-media-kind{position:absolute;left:5px;top:5px;padding:2px 5px;border-radius:8px;background:rgba(0,0,0,.66);color:#fff;font-size:9px;line-height:12px}.vr-media-remove{position:absolute;right:4px;top:4px;width:20px;height:20px;padding:0;border:0;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;font-size:15px;line-height:20px;cursor:pointer}.vr-media-remove:hover{background:rgba(0,0,0,.9)}.vr-media-remove:disabled{opacity:.45;cursor:default}.vr-media-dock>.vr-error{position:absolute;left:0;top:72px;max-width:100%;padding:5px 8px;border-radius:7px;background:var(--dsw-alias-bg-module-platform);box-shadow:0 4px 18px rgba(0,0,0,.18);font-size:11px;line-height:16px}
 `
@@ -152,7 +144,7 @@ function fmt(template: string, vars: Record<string, string | number>): string {
 }
 
 export const name = 'dsh-vision-reader'
-export const inject = ['slots', 'locale', 'connection', 'settingsScope']
+export const inject = ['slots', 'locale', 'connection']
 
 export async function apply(ctx: Context) {
   const slots = ctx.get('slots') as
@@ -164,11 +156,7 @@ export async function apply(ctx: Context) {
   const connection = ctx.get('connection') as
     | { rpc: { call(ch: string, ep: string, payload: unknown): Promise<{ ok: boolean; value?: unknown; error?: { message?: string } }> } }
     | undefined
-  const settingsScope = ctx.get('settingsScope') as
-    | { bind<T>(spec: SettingsScopeSpec<T>): SettingsScope<T> }
-    | undefined
-
-  if (!slots || !locale || !connection || !settingsScope) return
+  if (!slots || !locale || !connection) return
 
   const t = locale.bind(NS as never)
   ctx.effect(() => {
@@ -187,26 +175,15 @@ export async function apply(ctx: Context) {
     mediaListeners.clear()
   }, 'dsh-vision-reader: media preview teardown')
 
-  const scope = settingsScope.bind<ClientConfig>({ namespace: NS })
   const call = async (endpoint: string, payload: Record<string, unknown> = {}) => {
     const result = await connection.rpc.call(CHANNEL, endpoint, payload)
     if (result.ok) return result.value
     throw new Error(result.error?.message ?? 'RPC failed')
   }
-  const readFollow = () => { latestFollowLocale = scope.getSnapshot().value?.followLocale ?? true }
-  const unsubscribe = scope.subscribe(readFollow)
-  readFollow()
-  ctx.effect(() => () => { if (typeof unsubscribe === 'function') unsubscribe() }, 'dsh-vision-reader: settings subscription')
-
-  const toggleFollow = async (value: boolean) => {
-    latestFollowLocale = value
-    await scope.set('followLocale', value)
-  }
-
   slots.inject('settings.section', () => slots.register({
     name: 'settings.section', id: 'vision-reader', order: 25,
-    label: () => (latestFollowLocale ? t('nav') : '视觉模型'), locale: NS as never,
-    inject: () => ({ scope, call, t, toggleFollow }),
+    label: () => t('nav'), locale: NS as never,
+    inject: () => ({ call, t }),
   }, VLProviderSection))
 
   slots.inject('conversation.input.left', () => slots.register({
@@ -223,18 +200,16 @@ export async function apply(ctx: Context) {
 }
 
 interface SectionProps {
-  scope: SettingsScope<ClientConfig>
   call: (endpoint: string, payload?: Record<string, unknown>) => Promise<unknown>
   t: (key: string, vars?: Record<string, unknown>) => string
-  toggleFollow: (value: boolean) => Promise<void>
 }
 
-function VLProviderSection({ scope, call, t, toggleFollow }: SectionProps) {
+function VLProviderSection({ call, t }: SectionProps) {
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [hasKey, setHasKey] = useState(false)
   const [selectedModel, setSelectedModel] = useState('')
-  const [followLocale, setFollowLocale] = useState(true)
+  const [autoVisionFallback, setAutoVisionFallback] = useState(true)
   const [models, setModels] = useState<ModelDescriptor[]>([])
   const [health, setHealth] = useState<ProbeResult | null>(null)
   const [error, setError] = useState('')
@@ -243,18 +218,16 @@ function VLProviderSection({ scope, call, t, toggleFollow }: SectionProps) {
 
   useEffect(() => {
     let live = true
-    const initialFollow = scope.getSnapshot().value?.followLocale ?? true
-    setFollowLocale(initialFollow)
-    latestFollowLocale = initialFollow
     void call('get-state').then((value) => {
       if (!live) return
       const state = value as ServerState
       setBaseUrl(state.baseUrl ?? '')
       setHasKey(state.hasKey === true)
       setSelectedModel(state.selectedModel ?? '')
+      setAutoVisionFallback(state.autoVisionFallback !== false)
     }).catch((cause: unknown) => { if (live) setError(messageOf(cause)) })
     return () => { live = false }
-  }, [call, scope])
+  }, [call])
 
   const probe = async (): Promise<void> => {
     setBusy('probing'); setError(''); setSaved(false)
@@ -283,14 +256,15 @@ function VLProviderSection({ scope, call, t, toggleFollow }: SectionProps) {
     try { await call('set-model', { model }); setSelectedModel(model) } catch (cause) { setError(messageOf(cause)) }
   }
 
-  const changeFollow = async (): Promise<void> => {
-    const next = !followLocale
-    setFollowLocale(next)
-    try { await toggleFollow(next) } catch (cause) { setFollowLocale(!next); setError(messageOf(cause)) }
+  const changeAutoVision = async (): Promise<void> => {
+    const next = !autoVisionFallback
+    setAutoVisionFallback(next); setError('')
+    try { await call('set-auto-vision', { enabled: next }) } catch (cause) { setAutoVisionFallback(!next); setError(messageOf(cause)) }
   }
 
   return <section className="vr-section">
     <h2 className="vr-title">{t('title')}</h2>
+    <div className="vr-card vr-toggle-row"><span className="vr-toggle-copy"><span className="vr-card-title">{t('autoLabel')}</span><span className="vr-hint">{t('autoHint')}</span></span><button type="button" role="switch" aria-checked={autoVisionFallback} className={`vr-switch ${autoVisionFallback ? 'vr-switch-on' : ''}`} onClick={() => { void changeAutoVision() }} /></div>
     <p className="vr-intro">{t('hint')}</p>
 
     <form className="vr-card" onSubmit={save}>
@@ -318,8 +292,6 @@ function VLProviderSection({ scope, call, t, toggleFollow }: SectionProps) {
       </div>
       {selectedModel && <div className="vr-hint">{fmt(t('selected'), { model: selectedModel })}</div>}
     </div>
-
-    <div className="vr-toggle-row"><span className="vr-toggle-copy"><span className="vr-card-title">{t('followLabel')}</span><span className="vr-hint">{t('followHint')}</span></span><button type="button" role="switch" aria-checked={followLocale} className={`vr-switch ${followLocale ? 'vr-switch-on' : ''}`} onClick={() => { void changeFollow() }} /></div>
   </section>
 }
 

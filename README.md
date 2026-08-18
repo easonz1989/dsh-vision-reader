@@ -14,12 +14,14 @@ toggling.
 - **Settings → 视觉模型 / Visual Model**: fill in your Provider **Base URL** + **API key**
   (OpenAI-compatible), save, and it auto-reads the provider **health** and **VL model list**.
 - **VL capability guard**: selecting a model without vision shows an error and is rejected.
+- **Automatic text-model fallback**: an on-by-default setting at the top of the plugin lets
+  the configured VL provider read media when the primary model has no vision support.
 - **Automatic VL routing**: the next ordinary user message triggers the selected VL provider
   at Harness's plugin pre-step boundary. Its visual analysis is injected as text-only model
   context, so the primary chat model may remain text-only. The optional `analyze_media` tool
   remains available for explicit follow-up inspection.
-- **Follow-UI-language toggle**: the settings section title follows the harness language
-  (`中文 → 视觉模型`, `English → Visual Model`), or stays fixed when the toggle is off.
+- **Harness-native localization**: the plugin settings and title always follow the current
+  Harness interface language.
 - **Server-only credentials**: the UI writes `VISION_BASE` and `VISION_KEY` to
   `$DSH_HOME/vision-reader.env` (mode `0600`). The key is never projected through browser
   settings. Model and language preferences remain in the `vision-reader` settings namespace.

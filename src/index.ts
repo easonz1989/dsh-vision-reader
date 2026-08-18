@@ -28,14 +28,14 @@ export const SCHEMA = z.object({
   baseUrl: z.string(),
   apiKey: z.string(),
   selectedModel: z.string(),
-  followLocale: z.boolean().default(false),
+  autoVisionFallback: z.boolean().default(true),
 })
 
 export interface VisionConfig {
   baseUrl: string
   apiKey: string
   selectedModel: string
-  followLocale: boolean
+  autoVisionFallback: boolean
 }
 
 const MODEL_TIMEOUT_MS = 40_000
@@ -316,7 +316,7 @@ export function apply(ctx: Context) {
 
   ctx.inject(['settings'], (sctx: Context) => {
     settings = sctx.settings.register<VisionConfig>(NS, SCHEMA, {
-      base: { baseUrl: '', apiKey: '', selectedModel: '', followLocale: false },
+      base: { baseUrl: '', apiKey: '', selectedModel: '', autoVisionFallback: true },
     })
   })
 
@@ -326,7 +326,7 @@ export function apply(ctx: Context) {
       baseUrl: providerEnvironment.baseUrl || s?.baseUrl || '',
       apiKey: providerEnvironment.apiKey || s?.apiKey || '',
       selectedModel: s?.selectedModel ?? '',
-      followLocale: s?.followLocale ?? false,
+      autoVisionFallback: s?.autoVisionFallback ?? true,
     }
   }
 
@@ -377,6 +377,12 @@ export function apply(ctx: Context) {
             return { ok: true, value: { model: model.id } }
           }
 
+          if (endpoint === 'set-auto-vision') {
+            if (typeof p.enabled !== 'boolean') return rpcFail('set-auto-vision', 'enabled must be boolean')
+            await settings?.update({ autoVisionFallback: p.enabled })
+            return { ok: true, value: { enabled: p.enabled } }
+          }
+
           if (endpoint === 'receive-media') {
             if (!cfg.baseUrl || !cfg.selectedModel) {
               return rpcFail('receive-media', '请先在设置中启用视觉 Provider 并选择支持视觉的模型。')
@@ -419,7 +425,7 @@ export function apply(ctx: Context) {
                 baseUrl: cfg.baseUrl,
                 hasKey: !!cfg.apiKey,
                 selectedModel: cfg.selectedModel,
-                followLocale: cfg.followLocale,
+                autoVisionFallback: cfg.autoVisionFallback,
                 media: (pendingMedia.get(sessionId)?.items ?? []).map(item => ({ name: item.name, mime: item.mime })),
               },
             }
@@ -455,7 +461,7 @@ export function apply(ctx: Context) {
     const batch = pendingMedia.get(sessionId)
     const userPrompt = promptFromUserMessages(messages)
 
-    if (injected === undefined && batch !== undefined && userPrompt !== '') {
+    if (injected === undefined && batch !== undefined && userPrompt !== '' && getConfig().autoVisionFallback) {
       let flight = turnAnalysisFlights.get(key)
       if (flight === undefined) {
         flight = (async () => {

@@ -354,40 +354,24 @@ interface MediaDockProps {
   call: (endpoint: string, payload?: Record<string, unknown>) => Promise<unknown>
   t: (key: string, vars?: Record<string, unknown>) => string
   sessionId: string
+  session: { running: boolean }
   useInput: UseInput
   inputActions: InputActions
 }
 
-function MediaDock({ call, t, sessionId, useInput, inputActions }: MediaDockProps) {
+function MediaDock({ call, t, sessionId, session, useInput, inputActions }: MediaDockProps) {
   const media = useClientMedia(sessionId)
   const draft = useInput(state => state.draft)
   const [removing, setRemoving] = useState('')
   const [error, setError] = useState('')
 
-  // Once ordinary submit clears the draft, wait for the Host pre-step to
-  // consume the matching media batch. A manual draft clear does not remove
-  // previews because Host state still reports the batch as pending.
+  // Harness already publishes the authoritative running transition when a
+  // prompt is accepted. Clear only the browser preview from that event; the
+  // Host retains the submitted batch for exactly one VL pre-step. This avoids
+  // polling get-state while the provider is analyzing the media.
   useEffect(() => {
-    if (media.length === 0 || draft !== '') return
-    let live = true
-    let timer = 0
-    const poll = async () => {
-      try {
-        const state = await call('get-state', { sessionId }) as { media?: unknown[] }
-        if (!live) return
-        if (!Array.isArray(state.media) || state.media.length === 0) {
-          setClientMedia(sessionId, [])
-          return
-        }
-      } catch {
-        // The composer already reports transport failures. Keep the preview
-        // rather than losing user media on a transient polling error.
-      }
-      if (live) timer = window.setTimeout(() => { void poll() }, 800)
-    }
-    timer = window.setTimeout(() => { void poll() }, 250)
-    return () => { live = false; window.clearTimeout(timer) }
-  }, [call, draft, media.length, sessionId])
+    if (media.length > 0 && draft === '' && session.running) setClientMedia(sessionId, [])
+  }, [draft, media.length, session.running, sessionId])
 
   if (media.length === 0) return null
 

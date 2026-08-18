@@ -21,6 +21,11 @@ if (bundle.includes('conversation.input.dock')) {
   throw new Error('vision previews regressed to the detached composer dock')
 }
 
+const getStateCalls = bundle.match(/["']get-state["']/g) ?? []
+if (getStateCalls.length !== 1) {
+  throw new Error(`vision client must perform only the settings bootstrap get-state call; found ${getStateCalls.length}`)
+}
+
 for (const marker of ['conversation.input.left', 'vision-reader-media', 'autoVisionFallback', 'set-auto-vision']) {
   if (!bundle.includes(marker)) throw new Error(`client bundle is missing vision composer marker: ${marker}`)
 }

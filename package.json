@@ -1,6 +1,6 @@
 {
   "name": "dsh-vision-reader",
-  "version": "0.3.2",
+  "version": "0.3.5",
   "description": "Vision media reading for DeepSeek Harness: upload images/videos and analyze them through your own OpenAI-compatible VL provider, by an agent tool. Appears in Settings > Plugins and runs persistently.",
   "license": "MIT",
   "author": "easonz1989 <easonz1989@users.noreply.github.com>",

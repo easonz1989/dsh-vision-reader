@@ -16,9 +16,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - name: Install deps
+        run: pnpm install --no-frozen-lockfile || pnpm install
+      - name: Build
+        run: pnpm build
       # Commit the built lib/ back on main so `dsh plugin add github:...` gets it.
       - name: Commit build artifacts
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'

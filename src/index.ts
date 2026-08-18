@@ -1,5 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
 import { defineTool, type JsonValue, type ToolCallView } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-client-connection'
@@ -17,7 +19,7 @@ export interface RpcError {
 
 export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: RpcError }
 
-/** Durable settings namespace: Provider config lives in $DSH_HOME/settings.yaml. */
+/** Durable settings namespace: only non-secret UI preferences live here. */
 export const NS = settingsNamespace('vision-reader')
 
 export const SCHEMA = z.object({
@@ -36,7 +38,64 @@ export interface VisionConfig {
 
 const MODEL_TIMEOUT_MS = 40_000
 const ANALYZE_TIMEOUT_MS = 150_000
+const MAX_MEDIA_ITEMS = 6
+const MAX_MEDIA_PAYLOAD_BYTES = 40 * 1024 * 1024
+const ENV_FILE_NAME = 'vision-reader.env'
 const DEFAULT_PROMPT = '请用简洁清晰的中文，描述这张图片/影片的内容与关键细节。'
+
+interface ProviderEnvironment {
+  baseUrl: string
+  apiKey: string
+}
+
+function environmentPath(): string {
+  return join(process.env['DSH_HOME'] || join(process.cwd(), '.dsh'), ENV_FILE_NAME)
+}
+
+function parseEnvironmentFile(source: string): ProviderEnvironment {
+  const values: Record<string, string> = {}
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const at = line.indexOf('=')
+    if (at < 1) continue
+    const key = line.slice(0, at).trim()
+    const encoded = line.slice(at + 1).trim()
+    if (key !== 'VISION_BASE' && key !== 'VISION_KEY') continue
+    try {
+      values[key] = encoded.startsWith('"') ? String(JSON.parse(encoded)) : encoded
+    } catch {
+      values[key] = encoded
+    }
+  }
+  return { baseUrl: values['VISION_BASE'] ?? '', apiKey: values['VISION_KEY'] ?? '' }
+}
+
+async function readProviderEnvironment(): Promise<ProviderEnvironment> {
+  try {
+    return parseEnvironmentFile(await readFile(environmentPath(), 'utf8'))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { baseUrl: '', apiKey: '' }
+    throw error
+  }
+}
+
+async function writeProviderEnvironment(config: ProviderEnvironment): Promise<void> {
+  const target = environmentPath()
+  const parent = dirname(target)
+  const temporary = `${target}.tmp-${process.pid}-${Date.now()}`
+  await mkdir(parent, { recursive: true, mode: 0o700 })
+  const body = [
+    '# Managed by dsh-vision-reader. Server-side only.',
+    `VISION_BASE=${JSON.stringify(normalizeBaseUrl(config.baseUrl))}`,
+    `VISION_KEY=${JSON.stringify(config.apiKey)}`,
+    '',
+  ].join('\n')
+  await writeFile(temporary, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+  await chmod(temporary, 0o600)
+  await rename(temporary, target)
+  await chmod(target, 0o600)
+}
 
 /** Normalize a user-supplied base URL to `https://host/v1`-style (no trailing slash). */
 function normalizeBaseUrl(url: string): string {
@@ -144,20 +203,16 @@ export interface MediaItem {
   dataUrl: string
 }
 
-async function analyzeMedia(config: VisionConfig, prompt: string, media: MediaItem): Promise<AnalyzeResult> {
+async function analyzeMedia(config: VisionConfig, prompt: string, media: readonly MediaItem[]): Promise<AnalyzeResult> {
   const base = normalizeBaseUrl(config.baseUrl)
   if (!base) return { ok: false, error: '请先配置 Provider API Base URL' }
   if (!config.selectedModel) return { ok: false, error: '请先在设置中选择支持视觉的模型' }
-  const content =
-    /^image\//.test(media.mime)
-      ? [
-          { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: media.dataUrl } },
-        ]
-      : [
-          { type: 'text', text: prompt },
-          { type: 'input_video', video: media.dataUrl },
-        ]
+  const content: unknown[] = [{ type: 'text', text: prompt }]
+  for (const item of media) {
+    content.push(/^image\//.test(item.mime)
+      ? { type: 'image_url', image_url: { url: item.dataUrl } }
+      : { type: 'input_video', video: item.dataUrl })
+  }
   const payload = { model: config.selectedModel, messages: [{ role: 'user', content }], max_tokens: 1200 }
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (config.apiKey) headers['Authorization'] = 'Bearer ' + config.apiKey
@@ -171,7 +226,7 @@ async function analyzeMedia(config: VisionConfig, prompt: string, media: MediaIt
       const rec = body as { choices?: { message?: { content?: unknown } }[]; output_text?: unknown }
       const answer =
         (rec.choices?.[0]?.message?.content as string | undefined) ?? String(rec.output_text ?? JSON.stringify(body))
-      return { ok: true, text: String(answer), model: config.selectedModel, media: media.name }
+      return { ok: true, text: String(answer), model: config.selectedModel, media: media.map(item => item.name).join(', ') }
     }
     return { ok: false, error: `分析失败 HTTP ${status}: ${JSON.stringify(body).slice(0, 500)}`, status }
   } catch (e) {
@@ -184,11 +239,20 @@ export const inject = ['connection', 'tools', 'settings']
 
 export function apply(ctx: Context) {
   let settings: SettingsScope<VisionConfig> | undefined
-  let pendingMedia: MediaItem | null = null
+  let providerEnvironment: ProviderEnvironment = { baseUrl: '', apiKey: '' }
+  const pendingMedia = new Map<string, MediaItem[]>()
+  const environmentReady = readProviderEnvironment().then((value) => {
+    providerEnvironment = {
+      baseUrl: normalizeBaseUrl(value.baseUrl || process.env['VISION_BASE'] || ''),
+      apiKey: value.apiKey || process.env['VISION_KEY'] || '',
+    }
+    process.env['VISION_BASE'] = providerEnvironment.baseUrl
+    process.env['VISION_KEY'] = providerEnvironment.apiKey
+  })
 
   ctx.effect(() => () => {
     settings = undefined
-    pendingMedia = null
+    pendingMedia.clear()
   }, 'dsh-vision-reader: state teardown')
 
   ctx.inject(['settings'], (sctx: Context) => {
@@ -200,8 +264,8 @@ export function apply(ctx: Context) {
   const getConfig = (): VisionConfig => {
     const s = settings?.get()
     return {
-      baseUrl: s?.baseUrl ?? '',
-      apiKey: s?.apiKey ?? '',
+      baseUrl: providerEnvironment.baseUrl || s?.baseUrl || '',
+      apiKey: providerEnvironment.apiKey || s?.apiKey || '',
       selectedModel: s?.selectedModel ?? '',
       followLocale: s?.followLocale ?? false,
     }
@@ -213,15 +277,24 @@ export function apply(ctx: Context) {
       '/vision-reader',
       async (endpoint, payload): Promise<RpcResult<unknown>> => {
         try {
+          await environmentReady
           const p = (payload ?? {}) as Record<string, unknown>
           const cfg = getConfig()
+          const sessionId = typeof p.sessionId === 'string' && p.sessionId ? p.sessionId : '__default__'
 
           if (endpoint === 'save-config') {
-            await settings?.update({
+            const next = {
               baseUrl: normalizeBaseUrl(typeof p.baseUrl === 'string' ? p.baseUrl : cfg.baseUrl),
-              apiKey: typeof p.apiKey === 'string' ? p.apiKey : cfg.apiKey,
-            })
-            return { ok: true, value: { hasKey: !!getConfig().apiKey } }
+              apiKey: typeof p.apiKey === 'string' && p.apiKey !== '' ? p.apiKey : cfg.apiKey,
+            }
+            if (!next.baseUrl) return rpcFail('save-config', 'Provider API Base URL is required')
+            await writeProviderEnvironment(next)
+            providerEnvironment = next
+            process.env['VISION_BASE'] = next.baseUrl
+            process.env['VISION_KEY'] = next.apiKey
+            // Remove legacy browser-projected copies once the server-only env file is durable.
+            await settings?.update({ baseUrl: '', apiKey: '' })
+            return { ok: true, value: { baseUrl: next.baseUrl, hasKey: !!next.apiKey } }
           }
 
           if (endpoint === 'probe') {
@@ -246,14 +319,34 @@ export function apply(ctx: Context) {
           }
 
           if (endpoint === 'receive-media') {
-            const dataUrl = typeof p.dataUrl === 'string' ? p.dataUrl : ''
-            if (!dataUrl) return rpcFail('receive-media', '未收到媒体数据')
-            if (dataUrl.length > 30 * 1024 * 1024) return rpcFail('receive-media', '媒体文件过大（超过约 20MB），请压缩后重试。')
-            pendingMedia = { name: String(p.name ?? 'media'), mime: String(p.mime ?? 'application/octet-stream'), dataUrl }
+            const rawItems = Array.isArray(p.items) ? p.items : [p]
+            if (rawItems.length === 0 || rawItems.length > MAX_MEDIA_ITEMS) {
+              return rpcFail('receive-media', `每次请选择 1-${MAX_MEDIA_ITEMS} 个媒体文件。`)
+            }
+            const items: MediaItem[] = rawItems.map((raw, index) => {
+              const item = raw as Record<string, unknown>
+              const dataUrl = typeof item.dataUrl === 'string' ? item.dataUrl : ''
+              const mime = String(item.mime ?? '')
+              if (!/^data:(image|video)\/[a-z0-9.+-]+;base64,/i.test(dataUrl)) {
+                throw new Error(`媒体 ${index + 1} 不是受支持的 image/video data URL`)
+              }
+              if (!/^(image|video)\//i.test(mime)) throw new Error(`媒体 ${index + 1} 类型不受支持`)
+              return { name: String(item.name ?? `media-${index + 1}`), mime, dataUrl }
+            })
+            const payloadBytes = items.reduce((sum, item) => sum + Buffer.byteLength(item.dataUrl, 'utf8'), 0)
+            if (payloadBytes > MAX_MEDIA_PAYLOAD_BYTES) {
+              return rpcFail('receive-media', '媒体总大小超过 40MB，请减少文件或压缩后重试。')
+            }
+            pendingMedia.set(sessionId, items)
             return {
               ok: true,
-              value: { media: { name: pendingMedia.name, mime: pendingMedia.mime, mediaId: 'm-' + Date.now() } },
+              value: { media: items.map((item, index) => ({ name: item.name, mime: item.mime, mediaId: `m-${Date.now()}-${index}` })) },
             }
+          }
+
+          if (endpoint === 'clear-media') {
+            pendingMedia.delete(sessionId)
+            return { ok: true, value: {} }
           }
 
           if (endpoint === 'get-state') {
@@ -264,17 +357,18 @@ export function apply(ctx: Context) {
                 hasKey: !!cfg.apiKey,
                 selectedModel: cfg.selectedModel,
                 followLocale: cfg.followLocale,
-                media: pendingMedia ? { name: pendingMedia.name, mime: pendingMedia.mime } : null,
+                media: (pendingMedia.get(sessionId) ?? []).map(item => ({ name: item.name, mime: item.mime })),
               },
             }
           }
 
           if (endpoint === 'analyze') {
             const prompt = typeof p.prompt === 'string' && p.prompt ? p.prompt : DEFAULT_PROMPT
-            if (!pendingMedia) {
+            const media = pendingMedia.get(sessionId) ?? []
+            if (media.length === 0) {
               return { ok: false, error: { code: 'internal', message: '请先通过 Upload 上传图片或影片。', details: {} } }
             }
-            return { ok: true, value: await analyzeMedia(getConfig(), prompt, pendingMedia) }
+            return { ok: true, value: await analyzeMedia(getConfig(), prompt, media) }
           }
 
           return rpcFail(endpoint, '未知 endpoint')
@@ -300,12 +394,15 @@ export function apply(ctx: Context) {
           schema: { type: 'json' },
           render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
         },
-        async execute(args) {
-          if (!pendingMedia) return { ok: false, error: '请先通过 Upload 上传图片或影片。' }
+        async execute(args, exec) {
+          await environmentReady
+          const sessionId = exec.agent?.session.id ?? '__default__'
+          const media = pendingMedia.get(String(sessionId)) ?? []
+          if (media.length === 0) return { ok: false, error: '请先通过 Upload 上传图片或影片。' }
           return await analyzeMedia(
             getConfig(),
             (args as { prompt?: string })?.prompt ?? DEFAULT_PROMPT,
-            pendingMedia,
+            media,
           ) as unknown as JsonValue
         },
         presentCall: (args): ToolCallView | undefined => ({
@@ -319,7 +416,7 @@ export function apply(ctx: Context) {
   })
 
   return () => {
-    pendingMedia = null
+    pendingMedia.clear()
   }
 }
 

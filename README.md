@@ -9,7 +9,9 @@ toggling.
 
 ## Features
 
-- **Upload** button in the input tool row — accepts `image/*` and `video/*`.
+- Native **Add media** composer control — accepts up to six images/videos. Harness displays
+  thumbnails before sending and retains them on the user message. Videos use a generated
+  first-frame preview while the complete video is sent to the vision provider.
 - **Settings → 视觉模型 / Visual Model**: fill in your Provider **Base URL** + **API key**
   (OpenAI-compatible), save, and it auto-reads the provider **health** and **VL model list**.
 - **VL capability guard**: selecting a model without vision shows an error and is rejected.
@@ -18,8 +20,11 @@ toggling.
   conversation.
 - **Follow-UI-language toggle**: the settings section title follows the harness language
   (`中文 → 视觉模型`, `English → Visual Model`), or stays fixed when the toggle is off.
-- **Durable config**: your Provider settings persist in `$DSH_HOME/settings.yaml` via the
-  DSH settings namespace `vision-reader`.
+- **Server-only credentials**: the UI writes `VISION_BASE` and `VISION_KEY` to
+  `$DSH_HOME/vision-reader.env` (mode `0600`). The key is never projected through browser
+  settings. Model and language preferences remain in the `vision-reader` settings namespace.
+- **Conversation isolation**: pending media is scoped by Harness session rather than shared
+  across conversations.
 
 ## Install
 
@@ -54,9 +59,10 @@ it back, so `dsh plugin add github:...` always fetches a ready-to-install packag
 
 1. Open **Settings → 视觉模型 / Visual Model**.
 2. Enter your Provider **Base URL** (e.g. `https://api.provider.com/v1`) and, if required,
-   the **API Key**; click **Save & probe**.
+   the **API Key**; click **Save**. Then use **Test connection**.
 3. Pick a model marked **VL** (choosing a non-VL model is rejected with an error).
-4. Back in the conversation, click **Upload**, choose an image or video.
+4. Back in the conversation, click **Add media**, choose one or more images/videos, and
+   review the native Harness thumbnail rail before sending.
 5. Tell the agent: **"analyze this media"** (or ask a specific question). The agent calls
    the `analyze_media` tool, which sends the media to your VL provider and returns the
    analysis into the conversation.

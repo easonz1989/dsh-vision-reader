@@ -9,7 +9,7 @@ toggling.
 
 ## Features
 
-- Plugin-owned **Add media** composer control and thumbnail rail — accepts up to six
+- Plugin-owned **Add media** composer control and in-composer thumbnail rail — accepts up to six
   images/videos without putting image blocks into Harness's primary-model request.
 - **Settings → 视觉模型 / Visual Model**: fill in your Provider **Base URL** + **API key**
   (OpenAI-compatible), save, and it auto-reads the provider **health** and **VL model list**.

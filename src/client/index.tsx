@@ -35,6 +35,13 @@ interface ClientMedia {
   previewUrl: string
 }
 
+interface SubmittedMedia {
+  id: string
+  prompt: string
+  nodeKey: string
+  items: readonly Pick<ClientMedia, 'id' | 'name' | 'mime' | 'previewUrl'>[]
+}
+
 interface InputState {
   draft: string
   phase: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
@@ -49,6 +56,126 @@ type UseInput = <T>(selector: (state: InputState) => T) => T
 const clientMedia = new Map<string, readonly ClientMedia[]>()
 const mediaListeners = new Map<string, Set<() => void>>()
 const EMPTY_CLIENT_MEDIA: readonly ClientMedia[] = []
+const submittedMedia = new Map<string, SubmittedMedia[]>()
+const retainedPreviewUrls = new Set<string>()
+let activeMediaSessionId = ''
+let submittedRenderFrame = 0
+
+function normalizedText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim()
+}
+
+function mediaIcon(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 24 24')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '1.7')
+  const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect')
+  rect.setAttribute('x', '4')
+  rect.setAttribute('y', '5')
+  rect.setAttribute('width', '16')
+  rect.setAttribute('height', '14')
+  rect.setAttribute('rx', '2.5')
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+  path.setAttribute('d', 'm7 16 3.4-3.5 2.6 2.6 1.8-1.8L18 16M15.5 9.5h.01')
+  svg.append(rect, path)
+  return svg
+}
+
+function submittedMediaElement(record: SubmittedMedia): HTMLElement {
+  const group = document.createElement('div')
+  group.className = 'vr-sent-media'
+  group.dataset['vrSubmittedMedia'] = record.id
+  group.setAttribute('aria-label', 'Submitted media')
+
+  for (const item of record.items) {
+    const entry = document.createElement('div')
+    entry.className = 'vr-sent-media-entry'
+
+    const preview = document.createElement('a')
+    preview.className = 'vr-sent-preview'
+    preview.href = item.previewUrl
+    preview.target = '_blank'
+    preview.rel = 'noopener noreferrer'
+    preview.title = item.name
+    if (item.mime.startsWith('video/')) {
+      const video = document.createElement('video')
+      video.src = item.previewUrl
+      video.muted = true
+      video.playsInline = true
+      video.preload = 'metadata'
+      preview.append(video)
+    } else {
+      const image = document.createElement('img')
+      image.src = item.previewUrl
+      image.alt = item.name
+      preview.append(image)
+    }
+
+    const name = document.createElement('span')
+    name.className = 'vr-sent-name'
+    name.title = item.name
+    name.append(mediaIcon(), document.createTextNode(item.name))
+    entry.append(preview, name)
+    group.append(entry)
+  }
+  return group
+}
+
+function renderSubmittedMedia(sessionId: string): void {
+  const records = submittedMedia.get(sessionId)
+  if (records === undefined || records.length === 0) return
+  const rows = [...document.querySelectorAll<HTMLElement>('[data-chat-flow-kind="user"]')]
+  for (const record of [...records].reverse()) {
+    if (document.querySelector(`[data-vr-submitted-media="${CSS.escape(record.id)}"]`) !== null) continue
+    const prompt = normalizedText(record.prompt)
+    const exactCandidate = record.nodeKey === ''
+      ? null
+      : document.querySelector<HTMLElement>(`[data-chat-anchor-key="${CSS.escape(record.nodeKey)}"][data-chat-flow-kind="user"]`)
+    const exact = exactCandidate !== null
+      && (prompt === '' || normalizedText(exactCandidate.textContent ?? '').includes(prompt))
+      ? exactCandidate
+      : null
+    const row = exact ?? [...rows].reverse().find((candidate) => {
+      if (candidate.querySelector('[data-vr-submitted-media]') !== null) return false
+      return prompt === '' || normalizedText(candidate.textContent ?? '').includes(prompt)
+    })
+    const userRow = row?.firstElementChild
+    const userStack = userRow?.firstElementChild
+    if (!(userStack instanceof HTMLElement)) continue
+    userStack.prepend(submittedMediaElement(record))
+  }
+}
+
+function scheduleSubmittedMediaRender(sessionId: string): void {
+  if (submittedRenderFrame !== 0) cancelAnimationFrame(submittedRenderFrame)
+  submittedRenderFrame = requestAnimationFrame(() => {
+    submittedRenderFrame = 0
+    renderSubmittedMedia(sessionId)
+  })
+}
+
+function rememberSubmittedMedia(sessionId: string, prompt: string, nodeKey: string, items: readonly ClientMedia[]): void {
+  const records = submittedMedia.get(sessionId) ?? []
+  for (const item of items) retainedPreviewUrls.add(item.previewUrl)
+  records.push({
+    id: crypto.randomUUID(),
+    prompt,
+    nodeKey,
+    items: items.map(({ id, name, mime, previewUrl }) => ({ id, name, mime, previewUrl })),
+  })
+  const removed = records.slice(0, -12)
+  for (const record of removed) {
+    for (const item of record.items) {
+      retainedPreviewUrls.delete(item.previewUrl)
+      URL.revokeObjectURL(item.previewUrl)
+    }
+  }
+  submittedMedia.set(sessionId, records.slice(-12))
+  scheduleSubmittedMediaRender(sessionId)
+}
 
 function getClientMedia(sessionId: string): readonly ClientMedia[] {
   return clientMedia.get(sessionId) ?? EMPTY_CLIENT_MEDIA
@@ -58,7 +185,7 @@ function setClientMedia(sessionId: string, items: readonly ClientMedia[]): void 
   const previous = clientMedia.get(sessionId) ?? []
   const keep = new Set(items.map(item => item.id))
   for (const item of previous) {
-    if (!keep.has(item.id)) URL.revokeObjectURL(item.previewUrl)
+    if (!keep.has(item.id) && !retainedPreviewUrls.has(item.previewUrl)) URL.revokeObjectURL(item.previewUrl)
   }
   if (items.length === 0) clientMedia.delete(sessionId)
   else clientMedia.set(sessionId, items)
@@ -137,6 +264,7 @@ const styles = `
 .vr-toggle-row{display:flex;flex-direction:row;align-items:center;justify-content:space-between;gap:16px;padding:10px 0}.vr-card.vr-toggle-row{padding:12px 16px}.vr-toggle-copy{display:flex;flex:1;flex-direction:column;gap:2px}.vr-switch{position:relative;flex:none;width:36px;height:20px;border:0;border-radius:10px;background:var(--dsw-alias-bg-module-platform);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l2);cursor:pointer}.vr-switch:after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-tertiary);transition:transform .16s ease}.vr-switch-on{background:var(--dsw-alias-button-primary-fill);box-shadow:none}.vr-switch-on:after{transform:translateX(16px);background:var(--dsw-alias-label-primary-foreground)}
 .vr-upload-wrap{position:relative;display:inline-flex;align-items:center}.vr-upload{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}.vr-upload:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}.vr-upload svg{width:15px;height:15px}.vr-upload-error{position:absolute;left:0;top:34px;z-index:20;width:max-content;max-width:300px;padding:7px 9px;border-radius:8px;background:var(--dsw-alias-bg-module-platform);box-shadow:0 4px 18px rgba(0,0,0,.18);color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:16px}
 [data-composer-card]:has(.vr-media-dock){padding-top:90px}.vr-media-dock{box-sizing:border-box;position:absolute;z-index:2;top:10px;left:12px;right:12px;min-width:0;height:68px}.vr-media-list{display:flex;height:68px;gap:8px;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin}.vr-media-item{position:relative;flex:none;width:76px;height:68px;overflow:hidden;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}.vr-media-item img,.vr-media-item video{display:block;width:100%;height:100%;object-fit:cover}.vr-media-name{position:absolute;left:0;right:0;bottom:0;padding:14px 5px 4px;background:linear-gradient(transparent,rgba(0,0,0,.8));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#fff;font-size:9px;line-height:12px}.vr-media-kind{position:absolute;left:5px;top:5px;padding:2px 5px;border-radius:8px;background:rgba(0,0,0,.66);color:#fff;font-size:9px;line-height:12px}.vr-media-remove{position:absolute;right:4px;top:4px;width:20px;height:20px;padding:0;border:0;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;font-size:15px;line-height:20px;cursor:pointer}.vr-media-remove:hover{background:rgba(0,0,0,.9)}.vr-media-remove:disabled{opacity:.45;cursor:default}.vr-media-dock>.vr-error{position:absolute;left:0;top:72px;max-width:100%;padding:5px 8px;border-radius:7px;background:var(--dsw-alias-bg-module-platform);box-shadow:0 4px 18px rgba(0,0,0,.18);font-size:11px;line-height:16px}
+.vr-sent-media{display:flex;max-width:100%;flex-wrap:wrap;justify-content:flex-end;align-items:flex-end;gap:10px}.vr-sent-media-entry{display:flex;max-width:220px;flex-direction:column;align-items:flex-end;gap:7px}.vr-sent-preview{display:block;width:80px;height:50px;overflow:hidden;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background:var(--dsw-alias-bg-layer-1);box-shadow:0 1px 3px rgba(0,0,0,.16)}.vr-sent-preview:hover{border-color:var(--dsw-alias-border-l3)}.vr-sent-preview:focus-visible{outline:none;box-shadow:0 0 0 2px var(--dsw-alias-border-l3)}.vr-sent-preview img,.vr-sent-preview video{display:block;width:100%;height:100%;object-fit:cover}.vr-sent-name{box-sizing:border-box;display:flex;max-width:220px;height:28px;align-items:center;gap:5px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:var(--dsw-specific-bubble);color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.vr-sent-name svg{flex:none;width:13px;height:13px}
 `
 
 function fmt(template: string, vars: Record<string, string | number>): string {
@@ -173,7 +301,19 @@ export async function apply(ctx: Context) {
   ctx.effect(() => () => {
     for (const sessionId of [...clientMedia.keys()]) setClientMedia(sessionId, [])
     mediaListeners.clear()
+    for (const previewUrl of retainedPreviewUrls) URL.revokeObjectURL(previewUrl)
+    retainedPreviewUrls.clear()
+    submittedMedia.clear()
+    activeMediaSessionId = ''
+    if (submittedRenderFrame !== 0) cancelAnimationFrame(submittedRenderFrame)
   }, 'dsh-vision-reader: media preview teardown')
+  ctx.effect(() => {
+    const observer = new MutationObserver(() => {
+      if (activeMediaSessionId !== '') scheduleSubmittedMediaRender(activeMediaSessionId)
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => { observer.disconnect() }
+  }, 'dsh-vision-reader: submitted media transcript renderer')
 
   const call = async (endpoint: string, payload: Record<string, unknown> = {}) => {
     const result = await connection.rpc.call(CHANNEL, endpoint, payload)
@@ -355,23 +495,49 @@ interface MediaDockProps {
   t: (key: string, vars?: Record<string, unknown>) => string
   sessionId: string
   session: { running: boolean }
+  useSession: <T>(selector: (snapshot: {
+    chat: { order: readonly string[]; nodes: ReadonlyMap<string, { kind: string }> }
+  }) => T) => T
   useInput: UseInput
   inputActions: InputActions
 }
 
-function MediaDock({ call, t, sessionId, session, useInput, inputActions }: MediaDockProps) {
+function MediaDock({ call, t, sessionId, session, useSession, useInput, inputActions }: MediaDockProps) {
   const media = useClientMedia(sessionId)
   const draft = useInput(state => state.draft)
   const [removing, setRemoving] = useState('')
   const [error, setError] = useState('')
+  const lastDraft = useRef(draft)
+  const latestUserNodeKey = useSession((snapshot) => {
+    for (let index = snapshot.chat.order.length - 1; index >= 0; index -= 1) {
+      const key = snapshot.chat.order[index]
+      if (key !== undefined && snapshot.chat.nodes.get(key)?.kind === 'user') return key
+    }
+    return ''
+  })
+
+  useEffect(() => {
+    activeMediaSessionId = sessionId
+    scheduleSubmittedMediaRender(sessionId)
+    return () => {
+      if (activeMediaSessionId === sessionId) activeMediaSessionId = ''
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    if (draft !== '') lastDraft.current = draft
+  }, [draft])
 
   // Harness already publishes the authoritative running transition when a
   // prompt is accepted. Clear only the browser preview from that event; the
   // Host retains the submitted batch for exactly one VL pre-step. This avoids
   // polling get-state while the provider is analyzing the media.
   useEffect(() => {
-    if (media.length > 0 && draft === '' && session.running) setClientMedia(sessionId, [])
-  }, [draft, media.length, session.running, sessionId])
+    if (media.length > 0 && draft === '' && session.running) {
+      rememberSubmittedMedia(sessionId, lastDraft.current, latestUserNodeKey, media)
+      setClientMedia(sessionId, [])
+    }
+  }, [draft, latestUserNodeKey, media.length, session.running, sessionId])
 
   if (media.length === 0) return null
 

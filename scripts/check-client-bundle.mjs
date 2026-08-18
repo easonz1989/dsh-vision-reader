@@ -26,7 +26,16 @@ if (getStateCalls.length !== 1) {
   throw new Error(`vision client must perform only the settings bootstrap get-state call; found ${getStateCalls.length}`)
 }
 
-for (const marker of ['conversation.input.left', 'vision-reader-media', 'autoVisionFallback', 'set-auto-vision']) {
+for (const marker of [
+  'conversation.input.left',
+  'vision-reader-media',
+  'autoVisionFallback',
+  'set-auto-vision',
+  'data-chat-flow-kind',
+  'data-vr-submitted-media',
+  'vr-sent-media',
+  'prepend',
+]) {
   if (!bundle.includes(marker)) throw new Error(`client bundle is missing vision composer marker: ${marker}`)
 }
 

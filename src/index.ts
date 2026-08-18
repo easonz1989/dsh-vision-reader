@@ -1,7 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
-import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
+import { defineTool, type JsonValue, type ToolCallView } from '@deepseek-ai/dsh-tools'
+import type {} from '@deepseek-ai/dsh-client-connection'
 
 /**
  * Minimal local wire types for the Client→Host RPC channel. Matches the DSH
@@ -9,7 +10,7 @@ import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
  * on an internal @deepseek-ai package that is not published for consumers.
  */
 export interface RpcError {
-  code: string
+  code: 'internal'
   message: string
   details: Record<string, unknown>
 }
@@ -301,7 +302,11 @@ export function apply(ctx: Context) {
         },
         async execute(args) {
           if (!pendingMedia) return { ok: false, error: '请先通过 Upload 上传图片或影片。' }
-          return analyzeMedia(getConfig(), (args as { prompt?: string })?.prompt ?? DEFAULT_PROMPT, pendingMedia)
+          return await analyzeMedia(
+            getConfig(),
+            (args as { prompt?: string })?.prompt ?? DEFAULT_PROMPT,
+            pendingMedia,
+          ) as unknown as JsonValue
         },
         presentCall: (args): ToolCallView | undefined => ({
           card: 'generic',

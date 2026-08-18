@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { useState, useEffect } from 'react'
-import type { SettingsScopeSpec, SettingsScope } from '@deepseek-ai/dsh-client-ui-settings'
+import type { SettingsScopeSpec, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 
 /** Must match the host-registered namespace in src/index.ts. */
 const NS = 'vision-reader'
@@ -108,7 +108,12 @@ export async function apply(ctx: Context) {
   if (!slots || !locale || !connection || !settingsScope) return
 
   const t = locale.bind(NS as never)
-  ctx.effect(() => locale.register(NS as never, dict as never), 'dsh-vision-reader: dictionaries')
+  ctx.effect(() => {
+    const dispose = locale.register(NS as never, dict as never)
+    return () => {
+      if (typeof dispose === 'function') dispose()
+    }
+  }, 'dsh-vision-reader: dictionaries')
 
   const scope = settingsScope.bind<ClientConfig>({ namespace: NS })
 

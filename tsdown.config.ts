@@ -1,25 +1,40 @@
 import { defineConfig } from 'tsdown'
 
-export default defineConfig({
-  entry: {
-    index: 'src/index.ts',
-    client: 'src/client/index.tsx',
+const platformModules = [
+  'react',
+  'react/jsx-runtime',
+] as const
+
+export default defineConfig([
+  {
+    name: 'dsh-vision-reader',
+    entry: { index: 'src/index.ts' },
+    format: ['esm'],
+    platform: 'node',
+    target: 'es2022',
+    fixedExtension: false,
+    sourcemap: true,
+    clean: false,
+    dts: false,
+    outDir: 'lib',
   },
-  format: ['esm'],
-  platform: 'neutral',
-  sourcemap: true,
-  external: [
-    '@deepseek-ai/cordis',
-    '@deepseek-ai/dsh-settings',
-    '@deepseek-ai/dsh-tools',
-    '@deepseek-ai/dsh-host-apiproxy',
-    '@deepseek-ai/dsh-client-connection',
-    '@deepseek-ai/dsh-client-locale',
-    '@deepseek-ai/dsh-client-runtime',
-    '@deepseek-ai/dsh-client-ui-settings',
-    '@deepseek-ai/dsh-api-remotes',
-    'react',
-  ],
-  clean: true,
-  outDir: 'lib',
-})
+  {
+    name: 'dsh-vision-reader/client',
+    entry: { client: 'src/client/index.tsx' },
+    format: ['cjs'],
+    platform: 'browser',
+    target: 'es2022',
+    sourcemap: true,
+    clean: false,
+    dts: false,
+    outDir: 'lib',
+    external: [...platformModules],
+    noExternal: (id: string) => (platformModules.includes(id as (typeof platformModules)[number]) ? undefined : true),
+    outputOptions: {
+      entryFileNames: 'client.js',
+      banner: 'window.__ModuleLoader__.load({ id: "dsh-vision-reader", factory: (require) => {',
+      footer: 'return module.exports; } });',
+      intro: 'var module = { exports: {} }; var exports = module.exports;',
+    },
+  },
+])

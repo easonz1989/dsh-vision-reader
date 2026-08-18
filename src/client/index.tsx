@@ -54,9 +54,10 @@ type UseInput = <T>(selector: (state: InputState) => T) => T
 
 const clientMedia = new Map<string, readonly ClientMedia[]>()
 const mediaListeners = new Map<string, Set<() => void>>()
+const EMPTY_CLIENT_MEDIA: readonly ClientMedia[] = []
 
 function getClientMedia(sessionId: string): readonly ClientMedia[] {
-  return clientMedia.get(sessionId) ?? []
+  return clientMedia.get(sessionId) ?? EMPTY_CLIENT_MEDIA
 }
 
 function setClientMedia(sessionId: string, items: readonly ClientMedia[]): void {
@@ -181,6 +182,10 @@ export async function apply(ctx: Context) {
     document.head.append(element)
     return () => { element.remove() }
   }, 'dsh-vision-reader: styles')
+  ctx.effect(() => () => {
+    for (const sessionId of [...clientMedia.keys()]) setClientMedia(sessionId, [])
+    mediaListeners.clear()
+  }, 'dsh-vision-reader: media preview teardown')
 
   const scope = settingsScope.bind<ClientConfig>({ namespace: NS })
   const call = async (endpoint: string, payload: Record<string, unknown> = {}) => {
@@ -375,9 +380,10 @@ interface MediaDockProps {
   t: (key: string, vars?: Record<string, unknown>) => string
   sessionId: string
   useInput: UseInput
+  inputActions: InputActions
 }
 
-function MediaDock({ call, t, sessionId, useInput }: MediaDockProps) {
+function MediaDock({ call, t, sessionId, useInput, inputActions }: MediaDockProps) {
   const media = useClientMedia(sessionId)
   const draft = useInput(state => state.draft)
   const [removing, setRemoving] = useState('')
@@ -422,6 +428,7 @@ function MediaDock({ call, t, sessionId, useInput }: MediaDockProps) {
         })
       }
       setClientMedia(sessionId, remaining)
+      if (remaining.length === 0 && draft === t('defaultRequest')) inputActions.setDraft('')
     } catch (cause) {
       setError(fmt(t('uploadFail'), { err: messageOf(cause) }))
     } finally { setRemoving('') }

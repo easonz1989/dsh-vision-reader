@@ -1,8 +1,20 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
-import type { RpcResult, RpcError } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { defineTool, type ToolCallView } from '@deepseek-ai/dsh-tools'
+
+/**
+ * Minimal local wire types for the Client→Host RPC channel. Matches the DSH
+ * `RpcResult`/`RpcError` contract used by `ctx.connection.rpc` without depending
+ * on an internal @deepseek-ai package that is not published for consumers.
+ */
+export interface RpcError {
+  code: string
+  message: string
+  details: Record<string, unknown>
+}
+
+export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: RpcError }
 
 /** Durable settings namespace: Provider config lives in $DSH_HOME/settings.yaml. */
 export const NS = settingsNamespace('vision-reader')
@@ -291,10 +303,11 @@ export function apply(ctx: Context) {
           if (!pendingMedia) return { ok: false, error: '请先通过 Upload 上传图片或影片。' }
           return analyzeMedia(getConfig(), (args as { prompt?: string })?.prompt ?? DEFAULT_PROMPT, pendingMedia)
         },
-        presentCall: (_args): ToolCallView | undefined => ({
-          kind: 'card',
+        presentCall: (args): ToolCallView | undefined => ({
+          card: 'generic',
           title: '分析媒体',
-          summary: '调用 VL Provider 分析已上传的媒体',
+          kind: 'other',
+          rawInput: args,
         }),
       }),
     )

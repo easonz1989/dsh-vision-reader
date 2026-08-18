@@ -1,7 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
-import { createPortal } from 'react-dom'
 
 const NS = 'vision-reader'
 const CHANNEL = '/vision-reader'
@@ -46,37 +45,10 @@ interface InputActions {
 }
 
 type UseInput = <T>(selector: (state: InputState) => T) => T
-type UseSession = <T>(selector: (snapshot: SessionSnapshot) => T) => T
-
-interface SessionSnapshot {
-  chat: {
-    nodes: ReadonlyMap<string, {
-      key: string
-      kind: string
-      data: { seq?: number }
-    }>
-  }
-}
-
-interface TranscriptMediaSummary {
-  userMessageId: string
-  userSeq: number
-  items: { index: number; name: string; mime: string }[]
-}
-
-interface LoadedTranscriptMedia {
-  userSeq: number
-  items: { index: number; name: string; mime: string; dataUrl: string }[]
-}
 
 const clientMedia = new Map<string, readonly ClientMedia[]>()
 const mediaListeners = new Map<string, Set<() => void>>()
 const EMPTY_CLIENT_MEDIA: readonly ClientMedia[] = []
-const transcriptMediaCache = new Map<string, { index: number; name: string; mime: string; dataUrl: string }>()
-const transcriptRecordsCache = new Map<string, LoadedTranscriptMedia[]>()
-const transcriptRecordFlights = new Map<string, Promise<LoadedTranscriptMedia[]>>()
-const transcriptVersions = new Map<string, number>()
-const transcriptListeners = new Map<string, Set<() => void>>()
 
 function getClientMedia(sessionId: string): readonly ClientMedia[] {
   return clientMedia.get(sessionId) ?? EMPTY_CLIENT_MEDIA
@@ -108,31 +80,6 @@ function useClientMedia(sessionId: string): readonly ClientMedia[] {
     listener => subscribeClientMedia(sessionId, listener),
     () => getClientMedia(sessionId),
     () => getClientMedia(sessionId),
-  )
-}
-
-function invalidateTranscriptRecords(sessionId: string): void {
-  transcriptRecordsCache.delete(sessionId)
-  transcriptRecordFlights.delete(sessionId)
-  transcriptVersions.set(sessionId, (transcriptVersions.get(sessionId) ?? 0) + 1)
-  for (const listener of transcriptListeners.get(sessionId) ?? []) listener()
-}
-
-function subscribeTranscriptVersion(sessionId: string, listener: () => void): () => void {
-  const listeners = transcriptListeners.get(sessionId) ?? new Set<() => void>()
-  listeners.add(listener)
-  transcriptListeners.set(sessionId, listeners)
-  return () => {
-    listeners.delete(listener)
-    if (listeners.size === 0) transcriptListeners.delete(sessionId)
-  }
-}
-
-function useTranscriptVersion(sessionId: string): number {
-  return useSyncExternalStore(
-    listener => subscribeTranscriptVersion(sessionId, listener),
-    () => transcriptVersions.get(sessionId) ?? 0,
-    () => transcriptVersions.get(sessionId) ?? 0,
   )
 }
 
@@ -190,7 +137,6 @@ const styles = `
 .vr-toggle-row{display:flex;flex-direction:row;align-items:center;justify-content:space-between;gap:16px;padding:10px 0}.vr-card.vr-toggle-row{padding:12px 16px}.vr-toggle-copy{display:flex;flex:1;flex-direction:column;gap:2px}.vr-switch{position:relative;flex:none;width:36px;height:20px;border:0;border-radius:10px;background:var(--dsw-alias-bg-module-platform);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l2);cursor:pointer}.vr-switch:after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-tertiary);transition:transform .16s ease}.vr-switch-on{background:var(--dsw-alias-button-primary-fill);box-shadow:none}.vr-switch-on:after{transform:translateX(16px);background:var(--dsw-alias-label-primary-foreground)}
 .vr-upload-wrap{position:relative;display:inline-flex;align-items:center}.vr-upload{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}.vr-upload:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}.vr-upload svg{width:15px;height:15px}.vr-upload-error{position:absolute;left:0;top:34px;z-index:20;width:max-content;max-width:300px;padding:7px 9px;border-radius:8px;background:var(--dsw-alias-bg-module-platform);box-shadow:0 4px 18px rgba(0,0,0,.18);color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:16px}
 [data-composer-card]:has(.vr-media-dock){padding-top:90px}.vr-media-dock{box-sizing:border-box;position:absolute;z-index:2;top:10px;left:12px;right:12px;min-width:0;height:68px}.vr-media-list{display:flex;height:68px;gap:8px;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin}.vr-media-item{position:relative;flex:none;width:76px;height:68px;overflow:hidden;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}.vr-media-item img,.vr-media-item video{display:block;width:100%;height:100%;object-fit:cover}.vr-media-name{position:absolute;left:0;right:0;bottom:0;padding:14px 5px 4px;background:linear-gradient(transparent,rgba(0,0,0,.8));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#fff;font-size:9px;line-height:12px}.vr-media-kind{position:absolute;left:5px;top:5px;padding:2px 5px;border-radius:8px;background:rgba(0,0,0,.66);color:#fff;font-size:9px;line-height:12px}.vr-media-remove{position:absolute;right:4px;top:4px;width:20px;height:20px;padding:0;border:0;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;font-size:15px;line-height:20px;cursor:pointer}.vr-media-remove:hover{background:rgba(0,0,0,.9)}.vr-media-remove:disabled{opacity:.45;cursor:default}.vr-media-dock>.vr-error{position:absolute;left:0;top:72px;max-width:100%;padding:5px 8px;border-radius:7px;background:var(--dsw-alias-bg-module-platform);box-shadow:0 4px 18px rgba(0,0,0,.18);font-size:11px;line-height:16px}
-.vr-transcript-media{order:-1;display:grid;grid-template-columns:repeat(2,minmax(0,156px));gap:8px;max-width:min(525px,82vw)}.vr-transcript-media[data-count="1"]{grid-template-columns:minmax(0,min(360px,70vw))}.vr-transcript-image{display:block;width:100%;max-height:320px;object-fit:cover;border:1px solid var(--dsw-alias-border-l2);border-radius:16px;background:var(--dsw-alias-bg-layer-1)}
 `
 
 function fmt(template: string, vars: Record<string, string | number>): string {
@@ -227,11 +173,6 @@ export async function apply(ctx: Context) {
   ctx.effect(() => () => {
     for (const sessionId of [...clientMedia.keys()]) setClientMedia(sessionId, [])
     mediaListeners.clear()
-    transcriptMediaCache.clear()
-    transcriptRecordsCache.clear()
-    transcriptRecordFlights.clear()
-    transcriptVersions.clear()
-    transcriptListeners.clear()
   }, 'dsh-vision-reader: media preview teardown')
 
   const call = async (endpoint: string, payload: Record<string, unknown> = {}) => {
@@ -256,10 +197,6 @@ export async function apply(ctx: Context) {
     name: 'conversation.input.left', id: 'vision-reader-media', order: -1, locale: NS as never,
     inject: (sessionId: string) => ({ call, t, sessionId }),
   }, MediaDock))
-  slots.inject('conversation.input.left', () => slots.register({
-    name: 'conversation.input.left', id: 'vision-reader-transcript', order: -2, locale: NS as never,
-    inject: (sessionId: string) => ({ call, sessionId }),
-  }, TranscriptMediaController))
 }
 
 interface SectionProps {
@@ -413,109 +350,6 @@ function UploadEntry({ call, t, sessionId, inputActions, useInput }: UploadProps
   </div>
 }
 
-interface TranscriptMediaControllerProps {
-  call: (endpoint: string, payload?: Record<string, unknown>) => Promise<unknown>
-  sessionId: string
-  useSession: UseSession
-}
-
-/**
- * Project plugin-owned durable attachments into Harness's existing user stack.
- * The controller mounts through a public in-card slot and portals only its own
- * media nodes; the core user-message renderer and its actions remain untouched.
- */
-function TranscriptMediaController({ call, sessionId, useSession }: TranscriptMediaControllerProps) {
-  const nodeSignature = useSession(snapshot => [...snapshot.chat.nodes.values()]
-    .map(node => `${node.kind}\t${String(node.data.seq ?? '')}\t${node.key}`)
-    .join('\n'))
-  const transcriptVersion = useTranscriptVersion(sessionId)
-  const [records, setRecords] = useState<LoadedTranscriptMedia[]>([])
-  const [targets, setTargets] = useState<ReadonlyMap<number, Element>>(new Map())
-
-  useEffect(() => {
-    let live = true
-    const cachedRecords = transcriptRecordsCache.get(sessionId)
-    if (cachedRecords) {
-      setRecords(cachedRecords)
-      return () => { live = false }
-    }
-    let flight = transcriptRecordFlights.get(sessionId)
-    if (!flight) {
-      flight = (async () => {
-        const value = await call('get-state', { sessionId })
-        const state = value as { transcriptMedia?: TranscriptMediaSummary[] }
-        const summaries = Array.isArray(state.transcriptMedia) ? state.transcriptMedia : []
-        const loaded = await Promise.all(summaries.map(async summary => ({
-          userSeq: summary.userSeq,
-          items: await Promise.all(summary.items.map(async item => {
-            const cacheKey = `${sessionId}:${summary.userSeq}:${item.index}`
-            const cached = transcriptMediaCache.get(cacheKey)
-            if (cached) return cached
-            const media = await call('read-transcript-media', {
-              sessionId,
-              userSeq: summary.userSeq,
-              index: item.index,
-            }) as { name: string; mime: string; dataUrl: string }
-            const loadedItem = { index: item.index, name: media.name, mime: media.mime, dataUrl: media.dataUrl }
-            transcriptMediaCache.set(cacheKey, loadedItem)
-            return loadedItem
-          })),
-        })))
-        const visible = loaded.filter(record => record.items.length > 0)
-        if ((transcriptVersions.get(sessionId) ?? 0) === transcriptVersion) {
-          transcriptRecordsCache.set(sessionId, visible)
-        }
-        return visible
-      })()
-      transcriptRecordFlights.set(sessionId, flight)
-      void flight.finally(() => {
-        if (transcriptRecordFlights.get(sessionId) === flight) transcriptRecordFlights.delete(sessionId)
-      }).catch(() => {})
-    }
-    void flight.then(loaded => {
-      if (live) setRecords(loaded)
-    }).catch(() => {
-      // Transcript rendering is additive. A transient media read must never
-      // break the ordinary Harness message renderer.
-    })
-    return () => { live = false }
-  }, [call, sessionId, transcriptVersion])
-
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      const userKeys = new Map<number, string>()
-      for (const row of nodeSignature.split('\n')) {
-        const [kind, rawSeq, ...keyParts] = row.split('\t')
-        const seq = Number(rawSeq)
-        if (kind === 'user' && Number.isSafeInteger(seq)) userKeys.set(seq, keyParts.join('\t'))
-      }
-      const next = new Map<number, Element>()
-      const flowItems = [...document.querySelectorAll('[data-chat-flow-key]')]
-      for (const record of records) {
-        const key = userKeys.get(record.userSeq)
-        if (!key) continue
-        const flow = flowItems.find(element => element.getAttribute('data-chat-flow-key') === key)
-        const stack = flow?.querySelector('[data-time-hover-root] > div')
-        if (stack) next.set(record.userSeq, stack)
-      }
-      setTargets(next)
-    })
-    return () => { window.cancelAnimationFrame(frame) }
-  }, [nodeSignature, records])
-
-  return <>{records.map(record => {
-    const target = targets.get(record.userSeq)
-    if (!target) return null
-    return createPortal(
-      <div className="vr-transcript-media" data-count={record.items.length} data-vision-reader-transcript="">
-        {record.items.map(item => <img key={item.index} className="vr-transcript-image" src={item.dataUrl} alt={item.name} />)}
-      </div>,
-      target,
-      `vision-reader-${record.userSeq}`,
-    )
-  })}</>
-}
-
 interface MediaDockProps {
   call: (endpoint: string, payload?: Record<string, unknown>) => Promise<unknown>
   t: (key: string, vars?: Record<string, unknown>) => string
@@ -537,28 +371,21 @@ function MediaDock({ call, t, sessionId, useInput, inputActions }: MediaDockProp
     if (media.length === 0 || draft !== '') return
     let live = true
     let timer = 0
-    let delayMs = 750
     const poll = async () => {
       try {
         const state = await call('get-state', { sessionId }) as { media?: unknown[] }
         if (!live) return
         if (!Array.isArray(state.media) || state.media.length === 0) {
           setClientMedia(sessionId, [])
-          invalidateTranscriptRecords(sessionId)
-          // The Host clears the pending batch immediately before Harness
-          // commits the correlated context event. Refresh once more after
-          // that durable append so the new transcript image cannot race it.
-          window.setTimeout(() => { invalidateTranscriptRecords(sessionId) }, 400)
           return
         }
       } catch {
         // The composer already reports transport failures. Keep the preview
         // rather than losing user media on a transient polling error.
       }
-      delayMs = Math.min(delayMs * 2, 5_000)
-      if (live) timer = window.setTimeout(() => { void poll() }, delayMs)
+      if (live) timer = window.setTimeout(() => { void poll() }, 800)
     }
-    timer = window.setTimeout(() => { void poll() }, delayMs)
+    timer = window.setTimeout(() => { void poll() }, 250)
     return () => { live = false; window.clearTimeout(timer) }
   }, [call, draft, media.length, sessionId])
 

@@ -1,9 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
-import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { Message } from '@deepseek-ai/dsh-llm'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { settingsNamespace, type SettingsScope } from '@deepseek-ai/dsh-settings'
@@ -217,19 +215,6 @@ export interface VisionAnalysisSource {
   readonly provider: 'dsh-vision-reader'
   readonly model: string
   readonly mediaCount: number
-  readonly userMessageId: string
-  readonly transcriptMedia: readonly TranscriptMediaItem[]
-}
-
-export interface TranscriptMediaItem {
-  readonly name: string
-  readonly mime: ImageMediaType
-  readonly attachment: ImageAttachmentRef
-}
-
-interface ResolvedTranscriptMedia {
-  readonly source: VisionAnalysisSource
-  readonly userSeq: number
 }
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -238,12 +223,8 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-function latestUserMessage(messages: readonly Message[]): Message | undefined {
-  return [...messages].reverse().find(message => message.source.kind === 'user')
-}
-
-function promptFromUserMessages(messages: readonly Message[]): string {
-  const user = latestUserMessage(messages)
+function promptFromUserMessages(messages: readonly { content: readonly unknown[]; source: { kind: string } }[]): string {
+  const user = [...messages].reverse().find(message => message.source.kind === 'user')
   if (!user) return ''
   return user.content
     .filter((block): block is { type: 'text'; text: string } =>
@@ -309,7 +290,7 @@ async function analyzeMedia(config: VisionConfig, prompt: string, media: readonl
 }
 
 export const name = 'dsh-vision-reader'
-export const inject = ['agents', 'attachments', 'connection', 'tools', 'settings']
+export const inject = ['agents', 'connection', 'tools', 'settings']
 
 export function apply(ctx: Context) {
   let settings: SettingsScope<VisionConfig> | undefined
@@ -325,42 +306,6 @@ export function apply(ctx: Context) {
     process.env['VISION_BASE'] = providerEnvironment.baseUrl
     process.env['VISION_KEY'] = providerEnvironment.apiKey
   })
-
-  const persistTranscriptMedia = async (serviceCtx: Context, items: readonly MediaItem[]): Promise<TranscriptMediaItem[]> => {
-    const stored: TranscriptMediaItem[] = []
-    for (const item of items) {
-      const match = /^data:(image\/(?:png|jpeg|webp|gif));base64,([a-z0-9+/=\r\n]+)$/i.exec(item.dataUrl)
-      if (!match) continue
-      const mime = match[1]!.toLowerCase() as ImageMediaType
-      const data = Buffer.from(match[2]!, 'base64')
-      const attachment = await serviceCtx.attachments.saveImage({ data, mediaType: mime, name: item.name })
-      stored.push({ name: item.name, mime, attachment })
-    }
-    return stored
-  }
-
-  const transcriptMediaFor = (serviceCtx: Context, sessionId: string): ResolvedTranscriptMedia[] => {
-    const agent = serviceCtx.agents.get(sessionId as never)
-    if (!agent) return []
-    const userSeqByMessageId = new Map<string, number>()
-    const records: ResolvedTranscriptMedia[] = []
-    for (const rawEvent of agent.session.events) {
-      const event = rawEvent as unknown as { seq?: number; type?: string; data?: { id?: unknown; source?: unknown } }
-      if (event.type !== 'user/message') continue
-      const messageSource = event.data?.source as { kind?: unknown } | undefined
-      if (messageSource?.kind === 'user' && Number.isSafeInteger(event.seq)) {
-        userSeqByMessageId.set(String(event.data?.id ?? ''), Number(event.seq))
-        continue
-      }
-      const source = event.data?.source as Partial<VisionAnalysisSource> | undefined
-      if (source?.kind !== 'vision-analysis' || source.provider !== 'dsh-vision-reader') continue
-      if (typeof source.userMessageId !== 'string' || !Array.isArray(source.transcriptMedia)) continue
-      const userSeq = userSeqByMessageId.get(source.userMessageId)
-      if (userSeq === undefined) continue
-      records.push({ source: source as VisionAnalysisSource, userSeq })
-    }
-    return records
-  }
 
   ctx.effect(() => () => {
     settings = undefined
@@ -386,7 +331,7 @@ export function apply(ctx: Context) {
   }
 
   // ---- Client → Host RPC (real installed plugins have no host.call global) ----
-  ctx.inject(['connection', 'agents', 'attachments'], (cc: Context) => {
+  ctx.inject(['connection'], (cc: Context) => {
     cc.connection.rpc.handle(
       '/vision-reader',
       async (endpoint, payload): Promise<RpcResult<unknown>> => {
@@ -482,31 +427,6 @@ export function apply(ctx: Context) {
                 selectedModel: cfg.selectedModel,
                 autoVisionFallback: cfg.autoVisionFallback,
                 media: (pendingMedia.get(sessionId)?.items ?? []).map(item => ({ name: item.name, mime: item.mime })),
-                transcriptMedia: transcriptMediaFor(cc, sessionId).map(record => ({
-                  userMessageId: record.source.userMessageId,
-                  userSeq: record.userSeq,
-                  items: record.source.transcriptMedia.map((item, index) => ({ index, name: item.name, mime: item.mime })),
-                })),
-              },
-            }
-          }
-
-          if (endpoint === 'read-transcript-media') {
-            const userSeq = Number(p.userSeq)
-            const index = Number(p.index)
-            if (!Number.isSafeInteger(userSeq) || !Number.isSafeInteger(index) || index < 0) {
-              return rpcFail('read-transcript-media', 'userSeq and index must be safe integers')
-            }
-            const record = transcriptMediaFor(cc, sessionId).find(entry => entry.userSeq === userSeq)
-            const item = record?.source.transcriptMedia[index]
-            if (!item) return rpcFail('read-transcript-media', 'media item was not found for this session message')
-            const stored = await cc.attachments.readImage(item.attachment)
-            return {
-              ok: true,
-              value: {
-                name: item.name,
-                mime: stored.ref.mediaType,
-                dataUrl: `data:${stored.ref.mediaType};base64,${Buffer.from(stored.data).toString('base64')}`,
               },
             }
           }
@@ -534,14 +454,12 @@ export function apply(ctx: Context) {
   // can run, which incorrectly rejects a text-only primary model even though
   // this plugin owns a separate VL provider. Instead, analyze the pending media
   // at the Agent pre-step boundary and add the result as text-only context.
-  ctx.inject(['attachments'], (attachmentCtx: Context) => {
-    attachmentCtx.on('agent/pre-step', async ({ agent, messages, turn, signal }, next): Promise<PreStepDecision> => {
+  ctx.on('agent/pre-step', async ({ agent, messages, turn, signal }, next): Promise<PreStepDecision> => {
     const sessionId = String(agent.session.id)
     const key = `${sessionId}:${turn}`
     let injected = turnAnalyses.get(key)
     const batch = pendingMedia.get(sessionId)
     const userPrompt = promptFromUserMessages(messages)
-    const userMessage = latestUserMessage(messages)
 
     if (injected === undefined && batch !== undefined && userPrompt !== '' && getConfig().autoVisionFallback) {
       let flight = turnAnalysisFlights.get(key)
@@ -554,8 +472,6 @@ export function apply(ctx: Context) {
           if (!result.ok || !result.text?.trim()) {
             throw new Error(`Visual Model could not analyze the attached media: ${result.error ?? 'empty response'}`)
           }
-          if (!userMessage) throw new Error('Visual Model could not identify the durable user message')
-          const transcriptMedia = await persistTranscriptMedia(attachmentCtx, batch.items)
           return createUserMessage({
             content: [{ type: 'text', text: analysisContext(result, batch.items) }],
             source: {
@@ -563,8 +479,6 @@ export function apply(ctx: Context) {
               provider: 'dsh-vision-reader',
               model: result.model ?? getConfig().selectedModel,
               mediaCount: batch.items.length,
-              userMessageId: String(userMessage.id),
-              transcriptMedia,
             },
           })
         })()
@@ -583,13 +497,12 @@ export function apply(ctx: Context) {
     turnAnalyses.set(key, injected)
     if (batch !== undefined && pendingMedia.get(sessionId)?.id === batch.id) pendingMedia.delete(sessionId)
     return { kind: 'enter', messages: [...decision.messages, injected] }
-    })
+  })
 
-    attachmentCtx.on('agent/turn-stopping', ({ agent, turn }) => {
-      const key = `${String(agent.session.id)}:${turn}`
-      turnAnalyses.delete(key)
-      turnAnalysisFlights.delete(key)
-    })
+  ctx.on('agent/turn-stopping', ({ agent, turn }) => {
+    const key = `${String(agent.session.id)}:${turn}`
+    turnAnalyses.delete(key)
+    turnAnalysisFlights.delete(key)
   })
 
   // ---- agent-callable analyze_media tool (registered in the tool registry) ----

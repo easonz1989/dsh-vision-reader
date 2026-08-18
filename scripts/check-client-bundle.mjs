@@ -21,19 +21,11 @@ if (bundle.includes('conversation.input.dock')) {
   throw new Error('vision previews regressed to the detached composer dock')
 }
 
-for (const marker of [
-  'conversation.input.left',
-  'vision-reader-media',
-  'autoVisionFallback',
-  'set-auto-vision',
-  'read-transcript-media',
-  'data-vision-reader-transcript',
-  'react-dom',
-]) {
+for (const marker of ['conversation.input.left', 'vision-reader-media', 'autoVisionFallback', 'set-auto-vision']) {
   if (!bundle.includes(marker)) throw new Error(`client bundle is missing vision composer marker: ${marker}`)
 }
 
-for (const marker of ['autoVisionFallback', 'set-auto-vision', 'read-transcript-media', 'saveImage', 'readImage']) {
+for (const marker of ['autoVisionFallback', 'set-auto-vision']) {
   if (!hostBundle.includes(marker)) throw new Error(`host bundle is missing automatic vision marker: ${marker}`)
 }
 

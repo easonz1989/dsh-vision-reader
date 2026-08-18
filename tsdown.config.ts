@@ -2,7 +2,6 @@ import { defineConfig } from 'tsdown'
 
 const platformModules = [
   'react',
-  'react-dom',
   'react/jsx-runtime',
 ] as const
 

@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ChangeEvent, FormEvent } from 'react'
 import type { SettingsScopeSpec, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 
@@ -33,19 +33,59 @@ interface ServerState {
   followLocale: boolean
 }
 
-interface DraftAttachment {
+interface ClientMedia {
   id: string
-  file: File
+  name: string
+  mime: string
+  dataUrl: string
   previewUrl: string
 }
 
-interface ConversationService {
-  createDraftImages(files: readonly File[]): readonly DraftAttachment[]
-  releaseDraftImages(attachments: readonly DraftAttachment[]): void
+interface InputState {
+  draft: string
+  phase: 'plain' | 'adjudicating' | 'claimed' | 'submitting'
 }
 
 interface InputActions {
-  addImages(ids: readonly string[]): boolean
+  setDraft(text: string): void
+}
+
+type UseInput = <T>(selector: (state: InputState) => T) => T
+
+const clientMedia = new Map<string, readonly ClientMedia[]>()
+const mediaListeners = new Map<string, Set<() => void>>()
+
+function getClientMedia(sessionId: string): readonly ClientMedia[] {
+  return clientMedia.get(sessionId) ?? []
+}
+
+function setClientMedia(sessionId: string, items: readonly ClientMedia[]): void {
+  const previous = clientMedia.get(sessionId) ?? []
+  const keep = new Set(items.map(item => item.id))
+  for (const item of previous) {
+    if (!keep.has(item.id)) URL.revokeObjectURL(item.previewUrl)
+  }
+  if (items.length === 0) clientMedia.delete(sessionId)
+  else clientMedia.set(sessionId, items)
+  for (const listener of mediaListeners.get(sessionId) ?? []) listener()
+}
+
+function subscribeClientMedia(sessionId: string, listener: () => void): () => void {
+  const listeners = mediaListeners.get(sessionId) ?? new Set<() => void>()
+  listeners.add(listener)
+  mediaListeners.set(sessionId, listeners)
+  return () => {
+    listeners.delete(listener)
+    if (listeners.size === 0) mediaListeners.delete(sessionId)
+  }
+}
+
+function useClientMedia(sessionId: string): readonly ClientMedia[] {
+  return useSyncExternalStore(
+    listener => subscribeClientMedia(sessionId, listener),
+    () => getClientMedia(sessionId),
+    () => getClientMedia(sessionId),
+  )
 }
 
 let latestFollowLocale = true
@@ -64,6 +104,7 @@ const dict = {
     selected: '当前：{model}', supported: '支持视觉', unsupported: '未声明视觉能力',
     followLabel: '设置标题跟随界面语言', followHint: '关闭后固定显示“视觉模型”。',
     upload: '添加媒体', uploadBusy: '正在添加…', uploadTip: '添加最多 6 张图片或影片',
+    defaultRequest: '请分析我附加的媒体。', attached: '视觉模型附件', remove: '移除', video: '影片',
     uploadFail: '无法添加媒体：{err}', conversationUnavailable: 'Harness 附件服务尚未就绪',
   },
   en: {
@@ -79,6 +120,7 @@ const dict = {
     selected: 'Current: {model}', supported: 'Vision capable', unsupported: 'Vision capability not declared',
     followLabel: 'Follow the interface language', followHint: 'When off, the section name stays “视觉模型”.',
     upload: 'Add media', uploadBusy: 'Adding…', uploadTip: 'Attach up to 6 images or videos',
+    defaultRequest: 'Please analyze the attached media.', attached: 'Visual Model attachments', remove: 'Remove', video: 'Video',
     uploadFail: 'Could not add media: {err}', conversationUnavailable: 'Harness attachment service is not ready',
   },
 }
@@ -101,6 +143,7 @@ const styles = `
 .vr-radio{box-sizing:border-box;flex:none;width:16px;height:16px;border:1px solid var(--dsw-alias-border-l3);border-radius:50%;padding:3px}.vr-model-selected .vr-radio:after{content:'';display:block;width:100%;height:100%;border-radius:50%;background:var(--dsw-alias-button-primary-fill)}.vr-model-copy{min-width:0;flex:1}.vr-model-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:20px}.vr-model-meta{display:block;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}
 .vr-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0}.vr-toggle-copy{display:flex;flex-direction:column;gap:2px}.vr-switch{position:relative;flex:none;width:36px;height:20px;border:0;border-radius:10px;background:var(--dsw-alias-bg-module-platform);box-shadow:inset 0 0 0 1px var(--dsw-alias-border-l2);cursor:pointer}.vr-switch:after{content:'';position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:var(--dsw-alias-label-tertiary);transition:transform .16s ease}.vr-switch-on{background:var(--dsw-alias-button-primary-fill);box-shadow:none}.vr-switch-on:after{transform:translateX(16px);background:var(--dsw-alias-label-primary-foreground)}
 .vr-upload-wrap{position:relative;display:inline-flex;align-items:center}.vr-upload{box-sizing:border-box;display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:14px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}.vr-upload:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}.vr-upload svg{width:15px;height:15px}.vr-upload-error{position:absolute;left:0;top:34px;z-index:20;width:max-content;max-width:300px;padding:7px 9px;border-radius:8px;background:var(--dsw-alias-bg-module-platform);box-shadow:0 4px 18px rgba(0,0,0,.18);color:var(--dsw-alias-state-error-primary);font-size:11px;line-height:16px}
+.vr-media-dock{display:flex;flex-direction:column;gap:7px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-module-platform)}.vr-media-title{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary)}.vr-media-list{display:flex;gap:8px;overflow-x:auto;padding-bottom:1px}.vr-media-item{position:relative;flex:none;width:84px;height:68px;overflow:hidden;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1)}.vr-media-item img,.vr-media-item video{display:block;width:100%;height:100%;object-fit:cover}.vr-media-name{position:absolute;left:0;right:0;bottom:0;padding:14px 5px 4px;background:linear-gradient(transparent,rgba(0,0,0,.8));overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#fff;font-size:9px;line-height:12px}.vr-media-kind{position:absolute;left:5px;top:5px;padding:2px 5px;border-radius:8px;background:rgba(0,0,0,.66);color:#fff;font-size:9px;line-height:12px}.vr-media-remove{position:absolute;right:4px;top:4px;width:20px;height:20px;padding:0;border:0;border-radius:50%;background:rgba(0,0,0,.7);color:#fff;font-size:15px;line-height:20px;cursor:pointer}.vr-media-remove:hover{background:rgba(0,0,0,.9)}.vr-media-remove:disabled{opacity:.45;cursor:default}
 `
 
 function fmt(template: string, vars: Record<string, string | number>): string {
@@ -108,7 +151,7 @@ function fmt(template: string, vars: Record<string, string | number>): string {
 }
 
 export const name = 'dsh-vision-reader'
-export const inject = ['slots', 'locale', 'connection', 'settingsScope', 'conversation']
+export const inject = ['slots', 'locale', 'connection', 'settingsScope']
 
 export async function apply(ctx: Context) {
   const slots = ctx.get('slots') as
@@ -123,7 +166,6 @@ export async function apply(ctx: Context) {
   const settingsScope = ctx.get('settingsScope') as
     | { bind<T>(spec: SettingsScopeSpec<T>): SettingsScope<T> }
     | undefined
-  const conversation = ctx.get('conversation') as ConversationService | undefined
 
   if (!slots || !locale || !connection || !settingsScope) return
 
@@ -164,8 +206,12 @@ export async function apply(ctx: Context) {
 
   slots.inject('conversation.input.left', () => slots.register({
     name: 'conversation.input.left', id: 'vision-reader-upload', order: 0, locale: NS as never,
-    inject: (sessionId: string) => ({ call, t, conversation, sessionId }),
+    inject: (sessionId: string) => ({ call, t, sessionId }),
   }, UploadEntry))
+  slots.inject('conversation.input.dock', () => slots.register({
+    name: 'conversation.input.dock', id: 'vision-reader-media', order: -20, locale: NS as never,
+    inject: (sessionId: string) => ({ call, t, sessionId }),
+  }, MediaDock))
 }
 
 interface SectionProps {
@@ -272,36 +318,44 @@ function VLProviderSection({ scope, call, t, toggleFollow }: SectionProps) {
 interface UploadProps {
   call: (endpoint: string, payload?: Record<string, unknown>) => Promise<unknown>
   t: (key: string, vars?: Record<string, unknown>) => string
-  conversation?: ConversationService
   sessionId: string
-  inputActions?: InputActions
+  inputActions: InputActions
+  useInput: UseInput
 }
 
-function UploadEntry({ call, t, conversation, sessionId, inputActions }: UploadProps) {
+function UploadEntry({ call, t, sessionId, inputActions, useInput }: UploadProps) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const draft = useInput(state => state.draft)
 
   const onPick = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
-    const files = [...(event.target.files ?? [])].slice(0, MAX_MEDIA_ITEMS)
+    const existing = getClientMedia(sessionId)
+    const files = [...(event.target.files ?? [])].slice(0, Math.max(0, MAX_MEDIA_ITEMS - existing.length))
     event.target.value = ''
-    if (files.length === 0) return
+    if (files.length === 0) {
+      if (existing.length >= MAX_MEDIA_ITEMS) setError(fmt(t('uploadFail'), { err: t('uploadTip') }))
+      return
+    }
     setBusy(true); setError('')
-    let drafts: readonly DraftAttachment[] = []
+    let added: readonly ClientMedia[] = []
     try {
-      if (!conversation || !inputActions) throw new Error(t('conversationUnavailable'))
-      const items = await Promise.all(files.map(async file => ({ name: file.name, mime: file.type, dataUrl: await readFileAsDataUrl(file) })))
-      const previews = await Promise.all(files.map(file => previewFile(file)))
-      drafts = conversation.createDraftImages(previews)
-      await call('receive-media', { sessionId, items })
-      if (!inputActions.addImages(drafts.map(item => item.id))) {
-        conversation.releaseDraftImages(drafts)
-        drafts = []
-        await call('clear-media', { sessionId })
-        throw new Error(t('conversationUnavailable'))
-      }
+      added = await Promise.all(files.map(async file => ({
+        id: crypto.randomUUID(),
+        name: file.name || 'media',
+        mime: file.type,
+        dataUrl: await readFileAsDataUrl(file),
+        previewUrl: URL.createObjectURL(file),
+      })))
+      const combined = [...existing, ...added]
+      await call('receive-media', {
+        sessionId,
+        items: combined.map(item => ({ name: item.name, mime: item.mime, dataUrl: item.dataUrl })),
+      })
+      setClientMedia(sessionId, combined)
+      if (!draft.trim()) inputActions.setDraft(t('defaultRequest'))
     } catch (cause) {
-      if (drafts.length > 0) conversation?.releaseDraftImages(drafts)
+      for (const item of added) URL.revokeObjectURL(item.previewUrl)
       setError(fmt(t('uploadFail'), { err: messageOf(cause) }))
     } finally { setBusy(false) }
   }
@@ -316,6 +370,78 @@ function UploadEntry({ call, t, conversation, sessionId, inputActions }: UploadP
   </div>
 }
 
+interface MediaDockProps {
+  call: (endpoint: string, payload?: Record<string, unknown>) => Promise<unknown>
+  t: (key: string, vars?: Record<string, unknown>) => string
+  sessionId: string
+  useInput: UseInput
+}
+
+function MediaDock({ call, t, sessionId, useInput }: MediaDockProps) {
+  const media = useClientMedia(sessionId)
+  const draft = useInput(state => state.draft)
+  const [removing, setRemoving] = useState('')
+  const [error, setError] = useState('')
+
+  // Once ordinary submit clears the draft, wait for the Host pre-step to
+  // consume the matching media batch. A manual draft clear does not remove
+  // previews because Host state still reports the batch as pending.
+  useEffect(() => {
+    if (media.length === 0 || draft !== '') return
+    let live = true
+    let timer = 0
+    const poll = async () => {
+      try {
+        const state = await call('get-state', { sessionId }) as { media?: unknown[] }
+        if (!live) return
+        if (!Array.isArray(state.media) || state.media.length === 0) {
+          setClientMedia(sessionId, [])
+          return
+        }
+      } catch {
+        // The composer already reports transport failures. Keep the preview
+        // rather than losing user media on a transient polling error.
+      }
+      if (live) timer = window.setTimeout(() => { void poll() }, 800)
+    }
+    timer = window.setTimeout(() => { void poll() }, 250)
+    return () => { live = false; window.clearTimeout(timer) }
+  }, [call, draft, media.length, sessionId])
+
+  if (media.length === 0) return null
+
+  const remove = async (id: string): Promise<void> => {
+    const remaining = media.filter(item => item.id !== id)
+    setRemoving(id); setError('')
+    try {
+      if (remaining.length === 0) await call('clear-media', { sessionId })
+      else {
+        await call('receive-media', {
+          sessionId,
+          items: remaining.map(item => ({ name: item.name, mime: item.mime, dataUrl: item.dataUrl })),
+        })
+      }
+      setClientMedia(sessionId, remaining)
+    } catch (cause) {
+      setError(fmt(t('uploadFail'), { err: messageOf(cause) }))
+    } finally { setRemoving('') }
+  }
+
+  return <div className="vr-media-dock">
+    <div className="vr-media-title">{t('attached')}</div>
+    <div className="vr-media-list">
+      {media.map(item => <div className="vr-media-item" key={item.id}>
+        {item.mime.startsWith('video/')
+          ? <><video src={item.previewUrl} muted playsInline preload="metadata" /><span className="vr-media-kind">{t('video')}</span></>
+          : <img src={item.previewUrl} alt={item.name} />}
+        <span className="vr-media-name" title={item.name}>{item.name}</span>
+        <button type="button" className="vr-media-remove" title={t('remove')} aria-label={`${t('remove')} ${item.name}`} disabled={removing !== ''} onClick={() => { void remove(item.id) }}>×</button>
+      </div>)}
+    </div>
+    {error && <span className="vr-error" role="alert">{error}</span>}
+  </div>
+}
+
 function messageOf(value: unknown): string {
   return value instanceof Error ? value.message : String(value)
 }
@@ -326,73 +452,5 @@ function readFileAsDataUrl(file: File): Promise<string> {
     reader.onload = () => resolve(String(reader.result))
     reader.onerror = () => reject(reader.error ?? new Error('File read failed'))
     reader.readAsDataURL(file)
-  })
-}
-
-async function previewFile(file: File): Promise<File> {
-  if (/^image\/(png|jpeg|webp|gif)$/.test(file.type)) return file
-  if (file.type.startsWith('image/')) return renderImagePreview(file)
-  if (file.type.startsWith('video/')) return renderVideoPreview(file)
-  throw new Error(`Unsupported media type: ${file.type || 'unknown'}`)
-}
-
-async function renderImagePreview(file: File): Promise<File> {
-  const url = URL.createObjectURL(file)
-  try {
-    const image = new Image()
-    image.src = url
-    await image.decode()
-    return canvasFile(drawToCanvas(image, image.naturalWidth, image.naturalHeight), `${file.name || 'image'}-preview.jpg`)
-  } finally { URL.revokeObjectURL(url) }
-}
-
-async function renderVideoPreview(file: File): Promise<File> {
-  const url = URL.createObjectURL(file)
-  try {
-    const video = document.createElement('video')
-    video.muted = true; video.playsInline = true; video.preload = 'metadata'; video.src = url
-    await eventOnce(video, 'loadeddata', 10_000)
-    if (Number.isFinite(video.duration) && video.duration > 0.1) {
-      video.currentTime = Math.min(0.25, video.duration / 10)
-      await eventOnce(video, 'seeked', 10_000)
-    }
-    const canvas = drawToCanvas(video, video.videoWidth || 640, video.videoHeight || 360)
-    const context = canvas.getContext('2d')
-    if (context) {
-      context.fillStyle = 'rgba(0,0,0,.58)'; context.beginPath(); context.arc(34, 34, 20, 0, Math.PI * 2); context.fill()
-      context.fillStyle = '#fff'; context.beginPath(); context.moveTo(29, 24); context.lineTo(29, 44); context.lineTo(44, 34); context.closePath(); context.fill()
-    }
-    return canvasFile(canvas, `${file.name || 'video'}-preview.jpg`)
-  } finally { URL.revokeObjectURL(url) }
-}
-
-function drawToCanvas(source: CanvasImageSource, width: number, height: number): HTMLCanvasElement {
-  const max = 1280
-  const scale = Math.min(1, max / Math.max(width, height))
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(1, Math.round(width * scale)); canvas.height = Math.max(1, Math.round(height * scale))
-  const context = canvas.getContext('2d')
-  if (!context) throw new Error('Canvas is unavailable')
-  context.drawImage(source, 0, 0, canvas.width, canvas.height)
-  return canvas
-}
-
-function canvasFile(canvas: HTMLCanvasElement, name: string): Promise<File> {
-  return new Promise((resolve, reject) => canvas.toBlob(blob => {
-    if (!blob) reject(new Error('Could not create media preview'))
-    else resolve(new File([blob], name, { type: 'image/jpeg', lastModified: Date.now() }))
-  }, 'image/jpeg', 0.86))
-}
-
-function eventOnce(target: HTMLMediaElement, name: string, timeoutMs: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => finish(new Error(`Video preview timed out at ${name}`)), timeoutMs)
-    const onSuccess = () => finish()
-    const onError = () => finish(new Error('The browser could not decode this video for preview'))
-    const finish = (error?: Error) => {
-      window.clearTimeout(timer); target.removeEventListener(name, onSuccess); target.removeEventListener('error', onError)
-      if (error) reject(error); else resolve()
-    }
-    target.addEventListener(name, onSuccess, { once: true }); target.addEventListener('error', onError, { once: true })
   })
 }

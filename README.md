@@ -9,15 +9,15 @@ toggling.
 
 ## Features
 
-- Native **Add media** composer control — accepts up to six images/videos. Harness displays
-  thumbnails before sending and retains them on the user message. Videos use a generated
-  first-frame preview while the complete video is sent to the vision provider.
+- Plugin-owned **Add media** composer control and thumbnail rail — accepts up to six
+  images/videos without putting image blocks into Harness's primary-model request.
 - **Settings → 视觉模型 / Visual Model**: fill in your Provider **Base URL** + **API key**
   (OpenAI-compatible), save, and it auto-reads the provider **health** and **VL model list**.
 - **VL capability guard**: selecting a model without vision shows an error and is rejected.
-- **Agent tool `analyze_media`**: after uploading, just tell the agent "analyze this media";
-  the image/video (base64) is sent to your VL provider and the result comes back in the
-  conversation.
+- **Automatic VL routing**: the next ordinary user message triggers the selected VL provider
+  at Harness's plugin pre-step boundary. Its visual analysis is injected as text-only model
+  context, so the primary chat model may remain text-only. The optional `analyze_media` tool
+  remains available for explicit follow-up inspection.
 - **Follow-UI-language toggle**: the settings section title follows the harness language
   (`中文 → 视觉模型`, `English → Visual Model`), or stays fixed when the toggle is off.
 - **Server-only credentials**: the UI writes `VISION_BASE` and `VISION_KEY` to
@@ -62,10 +62,11 @@ it back, so `dsh plugin add github:...` always fetches a ready-to-install packag
    the **API Key**; click **Save**. Then use **Test connection**.
 3. Pick a model marked **VL** (choosing a non-VL model is rejected with an error).
 4. Back in the conversation, click **Add media**, choose one or more images/videos, and
-   review the native Harness thumbnail rail before sending.
-5. Tell the agent: **"analyze this media"** (or ask a specific question). The agent calls
-   the `analyze_media` tool, which sends the media to your VL provider and returns the
-   analysis into the conversation.
+   review the plugin thumbnail rail, and ask a question (an empty draft is populated with a
+   localized "analyze the attached media" request).
+5. Send normally. The plugin invokes the selected VL model first and supplies its analysis
+   to the primary model as text context. Harness never asks the primary model to accept an
+   image block.
 
 ### Video note
 

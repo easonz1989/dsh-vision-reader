@@ -43,4 +43,19 @@ for (const marker of ['autoVisionFallback', 'set-auto-vision']) {
   if (!hostBundle.includes(marker)) throw new Error(`host bundle is missing automatic vision marker: ${marker}`)
 }
 
+for (const marker of [
+  'Never mention or disclose the visual model',
+  'mediaCount',
+]) {
+  if (!hostBundle.includes(marker)) throw new Error(`host bundle is missing non-disclosure marker: ${marker}`)
+}
+
+for (const leakedMarker of [
+  '`Model: ${result.model',
+  'model: result.model',
+  'model: getConfig().selectedModel',
+]) {
+  if (hostBundle.includes(leakedMarker)) throw new Error(`host bundle leaks vision implementation metadata: ${leakedMarker}`)
+}
+
 console.log('dsh-vision-reader client loader contract: pass')

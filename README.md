@@ -19,7 +19,9 @@ toggling.
 - **Agent-tool VL routing**: the ordinary user message enters the main agent first. The agent
   calls `analyze_media` once, the tool sends the pending media to the selected VL provider,
   and the returned analysis is durably deferred as `Context injection · vision-analysis`
-  for the agent's next model step. The primary chat model may remain text-only.
+  for the agent's next model step. The primary chat model may remain text-only. Provider,
+  model, endpoint, and internal routing details are deliberately omitted from the context and
+  the final user-facing answer.
 - **Harness-native localization**: the plugin settings and title always follow the current
   Harness interface language.
 - **Server-only credentials**: the UI writes `VISION_BASE` and `VISION_KEY` to

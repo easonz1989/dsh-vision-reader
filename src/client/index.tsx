@@ -73,6 +73,10 @@ const clientMedia = new Map<string, readonly ClientMedia[]>()
 const mediaListeners = new Map<string, Set<() => void>>()
 const EMPTY_CLIENT_MEDIA: readonly ClientMedia[] = []
 const transcriptMediaCache = new Map<string, { index: number; name: string; mime: string; dataUrl: string }>()
+const transcriptRecordsCache = new Map<string, LoadedTranscriptMedia[]>()
+const transcriptRecordFlights = new Map<string, Promise<LoadedTranscriptMedia[]>>()
+const transcriptVersions = new Map<string, number>()
+const transcriptListeners = new Map<string, Set<() => void>>()
 
 function getClientMedia(sessionId: string): readonly ClientMedia[] {
   return clientMedia.get(sessionId) ?? EMPTY_CLIENT_MEDIA
@@ -104,6 +108,31 @@ function useClientMedia(sessionId: string): readonly ClientMedia[] {
     listener => subscribeClientMedia(sessionId, listener),
     () => getClientMedia(sessionId),
     () => getClientMedia(sessionId),
+  )
+}
+
+function invalidateTranscriptRecords(sessionId: string): void {
+  transcriptRecordsCache.delete(sessionId)
+  transcriptRecordFlights.delete(sessionId)
+  transcriptVersions.set(sessionId, (transcriptVersions.get(sessionId) ?? 0) + 1)
+  for (const listener of transcriptListeners.get(sessionId) ?? []) listener()
+}
+
+function subscribeTranscriptVersion(sessionId: string, listener: () => void): () => void {
+  const listeners = transcriptListeners.get(sessionId) ?? new Set<() => void>()
+  listeners.add(listener)
+  transcriptListeners.set(sessionId, listeners)
+  return () => {
+    listeners.delete(listener)
+    if (listeners.size === 0) transcriptListeners.delete(sessionId)
+  }
+}
+
+function useTranscriptVersion(sessionId: string): number {
+  return useSyncExternalStore(
+    listener => subscribeTranscriptVersion(sessionId, listener),
+    () => transcriptVersions.get(sessionId) ?? 0,
+    () => transcriptVersions.get(sessionId) ?? 0,
   )
 }
 
@@ -199,6 +228,10 @@ export async function apply(ctx: Context) {
     for (const sessionId of [...clientMedia.keys()]) setClientMedia(sessionId, [])
     mediaListeners.clear()
     transcriptMediaCache.clear()
+    transcriptRecordsCache.clear()
+    transcriptRecordFlights.clear()
+    transcriptVersions.clear()
+    transcriptListeners.clear()
   }, 'dsh-vision-reader: media preview teardown')
 
   const call = async (endpoint: string, payload: Record<string, unknown> = {}) => {
@@ -395,37 +428,58 @@ function TranscriptMediaController({ call, sessionId, useSession }: TranscriptMe
   const nodeSignature = useSession(snapshot => [...snapshot.chat.nodes.values()]
     .map(node => `${node.kind}\t${String(node.data.seq ?? '')}\t${node.key}`)
     .join('\n'))
+  const transcriptVersion = useTranscriptVersion(sessionId)
   const [records, setRecords] = useState<LoadedTranscriptMedia[]>([])
   const [targets, setTargets] = useState<ReadonlyMap<number, Element>>(new Map())
 
   useEffect(() => {
     let live = true
-    void call('get-state', { sessionId }).then(async (value) => {
-      const state = value as { transcriptMedia?: TranscriptMediaSummary[] }
-      const summaries = Array.isArray(state.transcriptMedia) ? state.transcriptMedia : []
-      const loaded = await Promise.all(summaries.map(async summary => ({
-        userSeq: summary.userSeq,
-        items: await Promise.all(summary.items.map(async item => {
-          const cacheKey = `${sessionId}:${summary.userSeq}:${item.index}`
-          const cached = transcriptMediaCache.get(cacheKey)
-          if (cached) return cached
-          const media = await call('read-transcript-media', {
-            sessionId,
-            userSeq: summary.userSeq,
-            index: item.index,
-          }) as { name: string; mime: string; dataUrl: string }
-          const loaded = { index: item.index, name: media.name, mime: media.mime, dataUrl: media.dataUrl }
-          transcriptMediaCache.set(cacheKey, loaded)
-          return loaded
-        })),
-      })))
-      if (live) setRecords(loaded.filter(record => record.items.length > 0))
+    const cachedRecords = transcriptRecordsCache.get(sessionId)
+    if (cachedRecords) {
+      setRecords(cachedRecords)
+      return () => { live = false }
+    }
+    let flight = transcriptRecordFlights.get(sessionId)
+    if (!flight) {
+      flight = (async () => {
+        const value = await call('get-state', { sessionId })
+        const state = value as { transcriptMedia?: TranscriptMediaSummary[] }
+        const summaries = Array.isArray(state.transcriptMedia) ? state.transcriptMedia : []
+        const loaded = await Promise.all(summaries.map(async summary => ({
+          userSeq: summary.userSeq,
+          items: await Promise.all(summary.items.map(async item => {
+            const cacheKey = `${sessionId}:${summary.userSeq}:${item.index}`
+            const cached = transcriptMediaCache.get(cacheKey)
+            if (cached) return cached
+            const media = await call('read-transcript-media', {
+              sessionId,
+              userSeq: summary.userSeq,
+              index: item.index,
+            }) as { name: string; mime: string; dataUrl: string }
+            const loadedItem = { index: item.index, name: media.name, mime: media.mime, dataUrl: media.dataUrl }
+            transcriptMediaCache.set(cacheKey, loadedItem)
+            return loadedItem
+          })),
+        })))
+        const visible = loaded.filter(record => record.items.length > 0)
+        if ((transcriptVersions.get(sessionId) ?? 0) === transcriptVersion) {
+          transcriptRecordsCache.set(sessionId, visible)
+        }
+        return visible
+      })()
+      transcriptRecordFlights.set(sessionId, flight)
+      void flight.finally(() => {
+        if (transcriptRecordFlights.get(sessionId) === flight) transcriptRecordFlights.delete(sessionId)
+      }).catch(() => {})
+    }
+    void flight.then(loaded => {
+      if (live) setRecords(loaded)
     }).catch(() => {
       // Transcript rendering is additive. A transient media read must never
       // break the ordinary Harness message renderer.
     })
     return () => { live = false }
-  }, [call, nodeSignature, sessionId])
+  }, [call, sessionId, transcriptVersion])
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -483,21 +537,28 @@ function MediaDock({ call, t, sessionId, useInput, inputActions }: MediaDockProp
     if (media.length === 0 || draft !== '') return
     let live = true
     let timer = 0
+    let delayMs = 750
     const poll = async () => {
       try {
         const state = await call('get-state', { sessionId }) as { media?: unknown[] }
         if (!live) return
         if (!Array.isArray(state.media) || state.media.length === 0) {
           setClientMedia(sessionId, [])
+          invalidateTranscriptRecords(sessionId)
+          // The Host clears the pending batch immediately before Harness
+          // commits the correlated context event. Refresh once more after
+          // that durable append so the new transcript image cannot race it.
+          window.setTimeout(() => { invalidateTranscriptRecords(sessionId) }, 400)
           return
         }
       } catch {
         // The composer already reports transport failures. Keep the preview
         // rather than losing user media on a transient polling error.
       }
-      if (live) timer = window.setTimeout(() => { void poll() }, 800)
+      delayMs = Math.min(delayMs * 2, 5_000)
+      if (live) timer = window.setTimeout(() => { void poll() }, delayMs)
     }
-    timer = window.setTimeout(() => { void poll() }, 250)
+    timer = window.setTimeout(() => { void poll() }, delayMs)
     return () => { live = false; window.clearTimeout(timer) }
   }, [call, draft, media.length, sessionId])
 

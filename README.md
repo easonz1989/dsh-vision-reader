@@ -11,6 +11,8 @@ toggling.
 
 - Plugin-owned **Add media** composer control and in-composer thumbnail rail — accepts up to six
   images/videos without putting image blocks into Harness's primary-model request.
+- Sent images are stored through Harness's immutable attachment service and rendered above the
+  matching user text in the transcript, while remaining outside text-only model requests.
 - **Settings → 视觉模型 / Visual Model**: fill in your Provider **Base URL** + **API key**
   (OpenAI-compatible), save, and it auto-reads the provider **health** and **VL model list**.
 - **VL capability guard**: selecting a model without vision shows an error and is rejected.

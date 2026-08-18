@@ -16,10 +16,10 @@ toggling.
 - **VL capability guard**: selecting a model without vision shows an error and is rejected.
 - **Automatic text-model fallback**: an on-by-default setting at the top of the plugin lets
   the configured VL provider read media when the primary model has no vision support.
-- **Automatic VL routing**: the next ordinary user message triggers the selected VL provider
-  at Harness's plugin pre-step boundary. Its visual analysis is injected as text-only model
-  context, so the primary chat model may remain text-only. The optional `analyze_media` tool
-  remains available for explicit follow-up inspection.
+- **Agent-tool VL routing**: the ordinary user message enters the main agent first. The agent
+  calls `analyze_media` once, the tool sends the pending media to the selected VL provider,
+  and the returned analysis is durably deferred as `Context injection · vision-analysis`
+  for the agent's next model step. The primary chat model may remain text-only.
 - **Harness-native localization**: the plugin settings and title always follow the current
   Harness interface language.
 - **Server-only credentials**: the UI writes `VISION_BASE` and `VISION_KEY` to
@@ -66,9 +66,9 @@ it back, so `dsh plugin add github:...` always fetches a ready-to-install packag
 4. Back in the conversation, click **Add media**, choose one or more images/videos, and
    review the plugin thumbnail rail, and ask a question (an empty draft is populated with a
    localized "analyze the attached media" request).
-5. Send normally. The plugin invokes the selected VL model first and supplies its analysis
-   to the primary model as text context. Harness never asks the primary model to accept an
-   image block.
+5. Send normally. The main agent calls the plugin tool, the plugin reads the media once, and
+   Harness records the returned text as `Context injection · vision-analysis` before the main
+   agent answers. Harness never asks the primary model to accept an image block.
 
 ### Video note
 

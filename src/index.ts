@@ -1,6 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -208,6 +207,8 @@ export interface MediaItem {
 interface PendingMediaBatch {
   id: string
   items: readonly MediaItem[]
+  analysis?: Promise<AnalyzeResult>
+  contextDeferred?: boolean
 }
 
 export interface VisionAnalysisSource {
@@ -296,8 +297,6 @@ export function apply(ctx: Context) {
   let settings: SettingsScope<VisionConfig> | undefined
   let providerEnvironment: ProviderEnvironment = { baseUrl: '', apiKey: '' }
   const pendingMedia = new Map<string, PendingMediaBatch>()
-  const turnAnalyses = new Map<string, ReturnType<typeof createUserMessage>>()
-  const turnAnalysisFlights = new Map<string, Promise<ReturnType<typeof createUserMessage>>>()
   const environmentReady = readProviderEnvironment().then((value) => {
     providerEnvironment = {
       baseUrl: normalizeBaseUrl(value.baseUrl || process.env['VISION_BASE'] || ''),
@@ -310,8 +309,6 @@ export function apply(ctx: Context) {
   ctx.effect(() => () => {
     settings = undefined
     pendingMedia.clear()
-    turnAnalyses.clear()
-    turnAnalysisFlights.clear()
   }, 'dsh-vision-reader: state teardown')
 
   ctx.inject(['settings'], (sctx: Context) => {
@@ -449,60 +446,9 @@ export function apply(ctx: Context) {
     )
   })
 
-  // A native Harness attachment is intentionally NOT created for plugin media.
-  // That path validates the primary model's image capability before the Agent
-  // can run, which incorrectly rejects a text-only primary model even though
-  // this plugin owns a separate VL provider. Instead, analyze the pending media
-  // at the Agent pre-step boundary and add the result as text-only context.
-  ctx.on('agent/pre-step', async ({ agent, messages, turn, signal }, next): Promise<PreStepDecision> => {
+  ctx.on('agent/turn-stopping', ({ agent }) => {
     const sessionId = String(agent.session.id)
-    const key = `${sessionId}:${turn}`
-    let injected = turnAnalyses.get(key)
-    const batch = pendingMedia.get(sessionId)
-    const userPrompt = promptFromUserMessages(messages)
-
-    if (injected === undefined && batch !== undefined && userPrompt !== '' && getConfig().autoVisionFallback) {
-      let flight = turnAnalysisFlights.get(key)
-      if (flight === undefined) {
-        flight = (async () => {
-          await environmentReady
-          signal.throwIfAborted()
-          const result = await analyzeMedia(getConfig(), visionPrompt(userPrompt), batch.items)
-          signal.throwIfAborted()
-          if (!result.ok || !result.text?.trim()) {
-            throw new Error(`Visual Model could not analyze the attached media: ${result.error ?? 'empty response'}`)
-          }
-          return createUserMessage({
-            content: [{ type: 'text', text: analysisContext(result, batch.items) }],
-            source: {
-              kind: 'vision-analysis',
-              provider: 'dsh-vision-reader',
-              model: result.model ?? getConfig().selectedModel,
-              mediaCount: batch.items.length,
-            },
-          })
-        })()
-        turnAnalysisFlights.set(key, flight)
-      }
-      try {
-        injected = await flight
-      } finally {
-        turnAnalysisFlights.delete(key)
-      }
-    }
-
-    const decision = await next()
-    if (decision.kind === 'reject' || injected === undefined) return decision
-
-    turnAnalyses.set(key, injected)
-    if (batch !== undefined && pendingMedia.get(sessionId)?.id === batch.id) pendingMedia.delete(sessionId)
-    return { kind: 'enter', messages: [...decision.messages, injected] }
-  })
-
-  ctx.on('agent/turn-stopping', ({ agent, turn }) => {
-    const key = `${String(agent.session.id)}:${turn}`
-    turnAnalyses.delete(key)
-    turnAnalysisFlights.delete(key)
+    if (pendingMedia.get(sessionId)?.contextDeferred) pendingMedia.delete(sessionId)
   })
 
   // ---- agent-callable analyze_media tool (registered in the tool registry) ----
@@ -521,14 +467,50 @@ export function apply(ctx: Context) {
         },
         async execute(args, exec) {
           await environmentReady
-          const sessionId = exec.agent?.session.id ?? '__default__'
-          const media = pendingMedia.get(String(sessionId))?.items ?? []
-          if (media.length === 0) return { ok: false, error: '请先通过 Upload 上传图片或影片。' }
-          return await analyzeMedia(
+          const sessionId = String(exec.agent?.session.id ?? '__default__')
+          const batch = pendingMedia.get(sessionId)
+          if (batch === undefined) return { ok: false, error: '请先通过 Upload 上传图片或影片。' }
+
+          if (batch.contextDeferred) {
+            return {
+              ok: true,
+              contextInjected: true,
+              model: getConfig().selectedModel,
+              media: batch.items.map(item => item.name).join(', '),
+            }
+          }
+
+          const explicitPrompt = (args as { prompt?: string })?.prompt?.trim() ?? ''
+          const userPrompt = exec.agent === undefined
+            ? ''
+            : promptFromUserMessages(exec.agent.session.deriveMessages())
+          batch.analysis ??= analyzeMedia(
             getConfig(),
-            (args as { prompt?: string })?.prompt ?? DEFAULT_PROMPT,
-            media,
-          ) as unknown as JsonValue
+            explicitPrompt || visionPrompt(userPrompt),
+            batch.items,
+          )
+          const result = await batch.analysis
+          if (!result.ok || !result.text?.trim()) {
+            batch.analysis = undefined
+            return result as unknown as JsonValue
+          }
+
+          exec.deferContext(createUserMessage({
+            content: [{ type: 'text', text: analysisContext(result, batch.items) }],
+            source: {
+              kind: 'vision-analysis',
+              provider: 'dsh-vision-reader',
+              model: result.model ?? getConfig().selectedModel,
+              mediaCount: batch.items.length,
+            },
+          }))
+          batch.contextDeferred = true
+          return {
+            ok: true,
+            contextInjected: true,
+            model: result.model ?? getConfig().selectedModel,
+            media: batch.items.map(item => item.name).join(', '),
+          }
         },
         presentCall: (args): ToolCallView | undefined => ({
           card: 'generic',
